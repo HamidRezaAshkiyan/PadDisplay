@@ -47,6 +47,23 @@ public struct NetworkSnapshot: Equatable, Sendable {
         if !ips.contains("192.168.2.1") { ips.append("192.168.2.1") }
         return ips
     }
+
+    public func localHTTPURL(port: UInt16 = 8080) -> String {
+        "http://\(localHostname):\(port)"
+    }
+
+    public func localHTTPSURL(port: UInt16 = 8443) -> String {
+        "https://\(localHostname):\(port)"
+    }
+
+    public static func normalizeLocalHostname(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "localhost" }
+        if trimmed.lowercased().hasSuffix(".local") {
+            return trimmed
+        }
+        return "\(trimmed).local"
+    }
 }
 
 /// Discovers active USB-over-IP (Internet Sharing / USB Ethernet) and Wi-Fi IPv4 interfaces on macOS.
@@ -140,10 +157,6 @@ public final class NetworkDiscovery: @unchecked Sendable {
     }
 
     private static func cleanLocalHostname() -> String {
-        let raw = ProcessInfo.processInfo.hostName
-        if raw.hasSuffix(".local") {
-            return raw
-        }
-        return "\(raw).local"
+        NetworkSnapshot.normalizeLocalHostname(ProcessInfo.processInfo.hostName)
     }
 }
