@@ -42,6 +42,7 @@ public final class StreamingServer: @unchecked Sendable {
     public var onClientsChanged: (@Sendable (ServerClientSummary) -> Void)?
     public var onRequestKeyframe: (@Sendable () -> Void)?
     public var onPointerEvent: (@Sendable (PointerEventMessage) -> Void)?
+    public var onClientDisplayMetrics: (@Sendable (ClientDisplayMetrics) -> Void)?
     public var onLog: (@Sendable (String) -> Void)?
 
     public init(httpPort: UInt16 = 8080, httpsPort: UInt16 = 8443, certManager: CertManager = CertManager()) {
@@ -211,8 +212,15 @@ public final class StreamingServer: @unchecked Sendable {
             return
         }
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let cmd = obj["cmd"] as? String, cmd == "keyframe" {
-            onRequestKeyframe?()
+           let cmd = obj["cmd"] as? String {
+            if cmd == "keyframe" {
+                onRequestKeyframe?()
+            } else if cmd == "displayMetrics",
+                      let w = (obj["width"] as? NSNumber)?.intValue,
+                      let h = (obj["height"] as? NSNumber)?.intValue {
+                let dpr = (obj["dpr"] as? NSNumber)?.doubleValue ?? 2.0
+                onClientDisplayMetrics?(ClientDisplayMetrics(width: w, height: h, dpr: dpr))
+            }
         }
     }
 

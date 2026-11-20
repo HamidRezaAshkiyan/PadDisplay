@@ -25,6 +25,8 @@ public final class AppState {
     public var selectedPreset: DisplayPreset = .default
     public var orientation: DisplayOrientation = .landscape
     public var hiDPI: Bool = false
+    public var autoMatchIPad: Bool = true
+    public private(set) var matchedResolutionLabel: String?
     public var preferredCodec: VideoCodec = .hevc {
         didSet { server.updatePreferredCodec(preferredCodec) }
     }
@@ -49,6 +51,7 @@ public final class AppState {
 
     // Engine instances
     private var virtualDisplay: PDVirtualDisplay?
+    private var lastAppliedMetrics: ClientDisplayMetrics?
     private let server = StreamingServer(httpPort: 8080, httpsPort: 8443)
     private let networkDiscovery = NetworkDiscovery()
     private let inputInjector = InputInjector()
@@ -173,7 +176,39 @@ public final class AppState {
         isRunning = false
         liveFPS = 0
         clients = ServerClientSummary()
+        matchedResolutionLabel = nil
+        lastAppliedMetrics = nil
         statusMessage = "Stopped"
+    }
+
+    public func applyClientMetricsIfEnabled(_ metrics: ClientDisplayMetrics) {
+        guard autoMatchIPad, isRunning, let display = virtualDisplay else { return }
+        if lastAppliedMetrics == metrics { return }
+        lastAppliedMetrics = metrics
+
+        let geo = metrics.resolvedGeometry(hiDPI: hiDPI)
+        orientation = metrics.orientation
+        matchedResolutionLabel = "\(geo.logicalWidth)×\(geo.logicalHeight)"
+
+        Task {
+            _ = display.applyLogicalWidth(
+                UInt(geo.logicalWidth),
+                logicalHeight: UInt(geo.logicalHeight),
+                hiDPI: hiDPI,
+                refreshRate: 60.0
+            )
+            server.updateDisplaySize(width: geo.pixelWidth, height: geo.pixelHeight)
+            do {
+                try await captureEngine?.start(
+                    displayID: display.displayID,
+                    pixelWidth: geo.pixelWidth,
+                    pixelHeight: geo.pixelHeight,
+                    fps: 60
+                )
+            } catch {
+                errorMessage = "Auto-match resize error: \(error.localizedDescription)"
+            }
+        }
     }
 
     public func applyDisplaySettingsIfRunning() {
@@ -225,6 +260,12 @@ public final class AppState {
 
         server.onPointerEvent = { [weak self] event in
             self?.inputInjector.handle(event)
+        }
+
+        server.onClientDisplayMetrics = { [weak self] metrics in
+            Task { @MainActor in
+                self?.applyClientMetricsIfEnabled(metrics)
+            }
         }
 
         server.onLog = { [weak self] msg in
