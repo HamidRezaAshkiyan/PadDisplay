@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run PadDisplaySelfTest
+        run: swift run PadDisplaySelfTest
+
+      - name: Build and sign PadDisplay.app
+        run: ./scripts/build-app.sh release
+
+      - name: Package .zip and .dmg artifacts
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          ZIP_PATH="dist/PadDisplay-${TAG}-macos-arm64.zip"
+          DMG_PATH="dist/PadDisplay-${TAG}-macos-arm64.dmg"
+
+          # Create macOS-native zip preserving bundle metadata and signature
+          ditto -c -k --sequesterRsrc --keepParent build/PadDisplay.app "${ZIP_PATH}"
+
+          # Create drag-to-Applications DMG
+          STAGING_DIR="dist/dmg-staging"
+          rm -rf "${STAGING_DIR}"
+          mkdir -p "${STAGING_DIR}"
+          cp -R build/PadDisplay.app "${STAGING_DIR}/PadDisplay.app"
+          ln -s /Applications "${STAGING_DIR}/Applications"
+          hdiutil create -volname "PadDisplay ${TAG}" \
+            -srcfolder "${STAGING_DIR}" \
+            -ov -format UDZO \
+            "${DMG_PATH}"
+          rm -rf "${STAGING_DIR}"
+
+          ls -lh dist/
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "${TAG}" \
+            "dist/PadDisplay-${TAG}-macos-arm64.zip" \
+            "dist/PadDisplay-${TAG}-macos-arm64.dmg" \
+            --title "PadDisplay ${TAG}" \
+            --generate-notes
