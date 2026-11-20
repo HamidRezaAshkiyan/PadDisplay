@@ -44,6 +44,7 @@ public final class AppState {
     public private(set) var statusMessage: String = "Stopped"
     public private(set) var errorMessage: String?
     public private(set) var liveFPS: Double = 0
+    public private(set) var telemetry: StreamTelemetry = StreamTelemetry()
     public private(set) var clients: ServerClientSummary = ServerClientSummary()
     public private(set) var network: NetworkSnapshot = NetworkDiscovery.currentSnapshot()
     public private(set) var accessibilityTrusted: Bool = InputInjector.isAccessibilityTrusted()
@@ -175,6 +176,7 @@ public final class AppState {
         inputInjector.setVirtualDisplayID(kCGNullDirectDisplay)
         isRunning = false
         liveFPS = 0
+        telemetry = StreamTelemetry()
         clients = ServerClientSummary()
         matchedResolutionLabel = nil
         lastAppliedMetrics = nil
@@ -265,6 +267,12 @@ public final class AppState {
         server.onClientDisplayMetrics = { [weak self] metrics in
             Task { @MainActor in
                 self?.applyClientMetricsIfEnabled(metrics)
+            }
+        }
+
+        server.onTelemetryUpdate = { [weak self] stats in
+            Task { @MainActor in
+                self?.telemetry = stats
             }
         }
 

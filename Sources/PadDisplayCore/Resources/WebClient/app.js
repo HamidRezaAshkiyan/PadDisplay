@@ -9,6 +9,7 @@
   const statusDot = document.getElementById('status-dot');
   const modeBadge = document.getElementById('mode-badge');
   const fpsBadge = document.getElementById('fps-badge');
+  const telemetryBadge = document.getElementById('telemetry-badge');
   const btnUpgrade = document.getElementById('btn-upgrade');
   const btnTouch = document.getElementById('btn-touch');
   const btnFit = document.getElementById('btn-fit');
@@ -39,6 +40,8 @@
   let lastFpsTick = performance.now();
   let jpegDecoding = false;
   let wakeLock = null;
+  let pingInterval = null;
+  let lastRttMs = 0;
   let serverInfo = { httpPort: 8080, httpsPort: 8443, httpsAvailable: true };
 
   // Fetch server info, negotiate HEVC (H.265) vs H.264, and start WebSocket
@@ -249,15 +252,31 @@
       showHUD(true);
       requestWakeLock();
       sendDisplayMetrics();
+      clearInterval(pingInterval);
+      pingInterval = setInterval(() => {
+        sendJSON({ cmd: 'ping', t: performance.now(), rttMs: lastRttMs });
+      }, 1500);
     };
 
     ws.onmessage = (evt) => {
       if (evt.data instanceof ArrayBuffer) {
         handleBinaryPacket(evt.data);
+      } else if (typeof evt.data === 'string') {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.cmd === 'pong' && typeof msg.t === 'number') {
+            lastRttMs = Math.max(0, performance.now() - msg.t);
+            const oneWay = Math.round(lastRttMs / 2);
+            const mbps = Number(msg.bitrateMbps || 0).toFixed(1);
+            const dropped = Number(msg.dropped || 0);
+            telemetryBadge.textContent = `${oneWay} ms • ${mbps} Mbps • ${dropped} drop`;
+          }
+        } catch (_) {}
       }
     };
 
     ws.onclose = () => {
+      clearInterval(pingInterval);
       statusDot.className = 'dot offline';
       modeBadge.className = 'badge';
       modeBadge.textContent = 'Reconnecting…';
