@@ -45,6 +45,18 @@ public struct StreamTelemetry: Sendable, Equatable {
     }
 }
 
+public struct PendingClientRequest: Identifiable, Sendable, Equatable {
+    public let id: UUID
+    public let remoteAddress: String
+    public let mode: ClientStreamMode
+
+    public init(id: UUID, remoteAddress: String, mode: ClientStreamMode) {
+        self.id = id
+        self.remoteAddress = remoteAddress
+        self.mode = mode
+    }
+}
+
 /// Dual-port HTTP/WS (:8080) + HTTPS/WSS (:8443) server built purely on Apple's Network.framework.
 public final class StreamingServer: @unchecked Sendable {
     public let httpPort: UInt16
@@ -66,12 +78,16 @@ public final class StreamingServer: @unchecked Sendable {
     private var latestBitrateMbps: Double = 0
     private var latestLatencyMs: Double = 0
     private var droppedFramesTotal: Int = 0
+    private var requireAuth: Bool = true
+    private var pinCode: String = StreamingServer.generatePIN()
+    private var pendingApprovals: [UUID: PendingClientRequest] = [:]
 
     public var onClientsChanged: (@Sendable (ServerClientSummary) -> Void)?
     public var onRequestKeyframe: (@Sendable () -> Void)?
     public var onPointerEvent: (@Sendable (PointerEventMessage) -> Void)?
     public var onClientDisplayMetrics: (@Sendable (ClientDisplayMetrics) -> Void)?
     public var onTelemetryUpdate: (@Sendable (StreamTelemetry) -> Void)?
+    public var onPendingApprovalsChanged: (@Sendable ([PendingClientRequest]) -> Void)?
     public var onLog: (@Sendable (String) -> Void)?
 
     public init(httpPort: UInt16 = 8080, httpsPort: UInt16 = 8443, certManager: CertManager = CertManager()) {
@@ -86,6 +102,49 @@ public final class StreamingServer: @unchecked Sendable {
 
     public func updatePreferredCodec(_ codec: VideoCodec) {
         lock.withLock { preferredCodec = codec }
+    }
+
+    public static func generatePIN() -> String {
+        String(format: "%04d", Int.random(in: 0...9999))
+    }
+
+    public static func verifyPIN(_ candidate: String, expected: String) -> Bool {
+        let clean = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !expected.isEmpty && clean == expected
+    }
+
+    public func updateSecurity(requireAuth: Bool, pinCode: String) {
+        lock.withLock {
+            self.requireAuth = requireAuth
+            self.pinCode = pinCode
+        }
+    }
+
+    public func approveClient(_ id: UUID) {
+        let client = lock.withLock { () -> ClientConnection? in
+            pendingApprovals.removeValue(forKey: id)
+            return connections[id]
+        }
+        notifyPendingApprovalsChanged()
+        if let client {
+            authorizeClient(client)
+        }
+    }
+
+    public func denyClient(_ id: UUID) {
+        let client = lock.withLock { () -> ClientConnection? in
+            pendingApprovals.removeValue(forKey: id)
+            return connections[id]
+        }
+        notifyPendingApprovalsChanged()
+        if let client {
+            let denied = WebSocketCodec.encodeServerFrame(
+                opcode: .text,
+                payload: Data("{\"cmd\":\"authDenied\"}".utf8)
+            )
+            client.sendControlFrame(denied)
+            client.close()
+        }
     }
 
     public var isHTTPSRunning: Bool {
@@ -153,6 +212,7 @@ public final class StreamingServer: @unchecked Sendable {
             self.latestBitrateMbps = 0
             self.latestLatencyMs = 0
             self.droppedFramesTotal = 0
+            self.pendingApprovals.removeAll()
             return (h, hs, c)
         }
         http?.cancel()
@@ -161,6 +221,7 @@ public final class StreamingServer: @unchecked Sendable {
             conn.close()
         }
         onTelemetryUpdate?(StreamTelemetry())
+        notifyPendingApprovalsChanged()
         notifyClientsChanged()
     }
 
@@ -171,7 +232,7 @@ public final class StreamingServer: @unchecked Sendable {
         }
 
         let targets = lock.withLock {
-            connections.values.filter { $0.wsMode == .h264 }
+            connections.values.filter { $0.wsMode == .h264 && $0.isAuthorized }
         }
         let isCritical = (packet.type == .h264Config || packet.type == .h264Keyframe)
         for client in targets {
@@ -186,7 +247,7 @@ public final class StreamingServer: @unchecked Sendable {
         }
 
         let targets = lock.withLock {
-            connections.values.filter { $0.wsMode == .hevc }
+            connections.values.filter { $0.wsMode == .hevc && $0.isAuthorized }
         }
         let isCritical = (packet.type == .hevcConfig || packet.type == .hevcKeyframe)
         for client in targets {
@@ -197,7 +258,7 @@ public final class StreamingServer: @unchecked Sendable {
     public func broadcastJPEG(_ packet: EncodedFramePacket) {
         let wsFrame = WebSocketCodec.encodeServerFrame(opcode: .binary, payload: packet.serialize())
         let targets = lock.withLock {
-            connections.values.filter { $0.wsMode == .jpeg }
+            connections.values.filter { $0.wsMode == .jpeg && $0.isAuthorized }
         }
         for client in targets {
             client.sendWebSocketFrame(wsFrame, isCritical: false)
@@ -218,25 +279,57 @@ public final class StreamingServer: @unchecked Sendable {
     }
 
     fileprivate func removeClient(_ id: UUID) {
-        let removed = lock.withLock { connections.removeValue(forKey: id) }
+        let (removed, removedPending) = lock.withLock { () -> (ClientConnection?, Bool) in
+            let r = connections.removeValue(forKey: id)
+            let p = pendingApprovals.removeValue(forKey: id) != nil
+            return (r, p)
+        }
+        if removedPending {
+            notifyPendingApprovalsChanged()
+        }
         if removed?.wsMode != nil {
             notifyClientsChanged()
         }
     }
 
     fileprivate func clientUpgradedToWebSocket(_ client: ClientConnection, mode: ClientStreamMode) {
+        let needsAuth = lock.withLock { requireAuth }
+        if !needsAuth {
+            authorizeClient(client)
+        } else {
+            let prompt = WebSocketCodec.encodeServerFrame(
+                opcode: .text,
+                payload: Data("{\"cmd\":\"authRequired\"}".utf8)
+            )
+            client.sendControlFrame(prompt)
+        }
+    }
+
+    private func authorizeClient(_ client: ClientConnection) {
+        client.setAuthorized(true)
+        let okFrame = WebSocketCodec.encodeServerFrame(
+            opcode: .text,
+            payload: Data("{\"cmd\":\"authOK\"}".utf8)
+        )
+        client.sendControlFrame(okFrame)
         notifyClientsChanged()
-        if mode == .h264 {
+
+        if client.wsMode == .h264 {
             if let config = lock.withLock({ cachedH264Config }) {
                 client.sendWebSocketFrame(config, isCritical: true)
             }
             onRequestKeyframe?()
-        } else if mode == .hevc {
+        } else if client.wsMode == .hevc {
             if let config = lock.withLock({ cachedHEVCConfig }) {
                 client.sendWebSocketFrame(config, isCritical: true)
             }
             onRequestKeyframe?()
         }
+    }
+
+    private func notifyPendingApprovalsChanged() {
+        let list = lock.withLock { Array(pendingApprovals.values) }
+        onPendingApprovalsChanged?(list)
     }
 
     fileprivate func recordSentBytes(_ count: Int) {
@@ -266,12 +359,38 @@ public final class StreamingServer: @unchecked Sendable {
 
     fileprivate func handleWebSocketText(_ text: String, from client: ClientConnection) {
         guard let data = text.data(using: .utf8) else { return }
-        if let pointer = try? JSONDecoder().decode(PointerEventMessage.self, from: data) {
-            onPointerEvent?(pointer)
-            return
-        }
+
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let cmd = obj["cmd"] as? String {
+            if cmd == "auth" {
+                let candidate = (obj["pin"] as? String) ?? ""
+                let expected = lock.withLock { pinCode }
+                if Self.verifyPIN(candidate, expected: expected) {
+                    authorizeClient(client)
+                } else {
+                    let fail = WebSocketCodec.encodeServerFrame(
+                        opcode: .text,
+                        payload: Data("{\"cmd\":\"authFailed\",\"reason\":\"Incorrect PIN\"}".utf8)
+                    )
+                    client.sendControlFrame(fail)
+                }
+                return
+            } else if cmd == "requestApproval" {
+                if let mode = client.wsMode {
+                    let req = PendingClientRequest(
+                        id: client.id,
+                        remoteAddress: client.remoteAddress,
+                        mode: mode
+                    )
+                    lock.withLock { pendingApprovals[client.id] = req }
+                    notifyPendingApprovalsChanged()
+                }
+                return
+            }
+
+            // Gate all non-auth commands behind authorization
+            guard client.isAuthorized else { return }
+
             if cmd == "keyframe" {
                 onRequestKeyframe?()
             } else if cmd == "displayMetrics",
@@ -299,6 +418,12 @@ public final class StreamingServer: @unchecked Sendable {
                 client.sendControlFrame(pongFrame)
                 onTelemetryUpdate?(snap)
             }
+            return
+        }
+
+        guard client.isAuthorized else { return }
+        if let pointer = try? JSONDecoder().decode(PointerEventMessage.self, from: data) {
+            onPointerEvent?(pointer)
         }
     }
 
@@ -352,7 +477,7 @@ public final class StreamingServer: @unchecked Sendable {
             var h264 = 0
             var hevc = 0
             var jpeg = 0
-            for c in connections.values {
+            for c in connections.values where c.isAuthorized {
                 switch c.wsMode {
                 case .h264: h264 += 1
                 case .hevc: hevc += 1
@@ -378,11 +503,29 @@ private final class ClientConnection: @unchecked Sendable {
     private let lock = NSLock()
     private var readBuffer = Data()
     private var _wsMode: ClientStreamMode?
+    private var _isAuthorized: Bool = false
     private var inFlightSends: Int = 0
     private var isClosed: Bool = false
 
     var wsMode: ClientStreamMode? {
         lock.withLock { _wsMode }
+    }
+
+    var isAuthorized: Bool {
+        lock.withLock { _isAuthorized }
+    }
+
+    func setAuthorized(_ value: Bool) {
+        lock.withLock { _isAuthorized = value }
+    }
+
+    var remoteAddress: String {
+        switch nwConnection.endpoint {
+        case .hostPort(let host, _):
+            return "\(host)"
+        default:
+            return "iPad"
+        }
     }
 
     init(nwConnection: NWConnection, isTLS: Bool, queue: DispatchQueue, server: StreamingServer) {

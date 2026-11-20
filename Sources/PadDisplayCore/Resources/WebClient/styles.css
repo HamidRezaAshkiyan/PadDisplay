@@ -227,3 +227,36 @@ html, body {
   gap: 10px;
   justify-content: flex-end;
 }
+
+.pin-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+#pin-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  color: #fff;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 8px;
+  text-align: center;
+  padding: 10px 14px;
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+#pin-input:focus {
+  border-color: #0a84ff;
+}
+
+.auth-status {
+  min-height: 20px;
+  font-size: 13px;
+  color: #ff9f0a;
+  margin-bottom: 12px;
+}

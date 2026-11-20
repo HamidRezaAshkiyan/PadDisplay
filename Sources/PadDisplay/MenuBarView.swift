@@ -9,8 +9,14 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             headerSection
+            if !state.pendingApprovals.isEmpty {
+                Divider()
+                pendingApprovalsSection
+            }
             Divider()
             connectionSection
+            Divider()
+            securitySection
             Divider()
             displaySettingsSection
             Divider()
@@ -20,6 +26,63 @@ struct MenuBarView: View {
         .frame(width: 340)
         .onAppear {
             state.refreshPermissions()
+        }
+    }
+
+    // MARK: - Pending Approvals
+
+    private var pendingApprovalsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(state.pendingApprovals) { req in
+                HStack(spacing: 8) {
+                    Image(systemName: "ipad.and.arrow.forward")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Allow iPad to connect?")
+                            .font(.caption.weight(.semibold))
+                        Text(req.remoteAddress)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Deny") { state.denyClient(req.id) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    Button("Allow") { state.approveClient(req.id) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+                .padding(8)
+                .background(Color.orange.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    // MARK: - Security (PIN)
+
+    private var securitySection: some View {
+        HStack {
+            Toggle("Require PIN", isOn: $state.requireAuth)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+
+            Spacer()
+
+            if state.requireAuth {
+                Text("PIN: \(state.pinCode)")
+                    .font(.system(.subheadline, design: .monospaced).weight(.bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                Button(action: { state.regeneratePIN() }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Generate a new 4-digit PIN")
+            }
         }
     }
 

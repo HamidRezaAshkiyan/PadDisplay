@@ -36,6 +36,11 @@ public final class AppState {
     public var connectionTab: ConnectionTab = .wifi
     public var protocolTab: ProtocolTab = .http
     public var preferLocalHostname: Bool = true
+    public var requireAuth: Bool = true {
+        didSet { server.updateSecurity(requireAuth: requireAuth, pinCode: pinCode) }
+    }
+    public private(set) var pinCode: String = StreamingServer.generatePIN()
+    public private(set) var pendingApprovals: [PendingClientRequest] = []
     public var copiedFeedback: Bool = false
 
     // Live runtime state
@@ -59,6 +64,7 @@ public final class AppState {
     private var captureEngine: DisplayCaptureEngine?
 
     public init() {
+        server.updateSecurity(requireAuth: requireAuth, pinCode: pinCode)
         setupCallbacks()
         networkDiscovery.start { [weak self] snapshot in
             Task { @MainActor in
@@ -101,6 +107,19 @@ public final class AppState {
 
     public func refreshPermissions() {
         accessibilityTrusted = InputInjector.isAccessibilityTrusted()
+    }
+
+    public func regeneratePIN() {
+        pinCode = StreamingServer.generatePIN()
+        server.updateSecurity(requireAuth: requireAuth, pinCode: pinCode)
+    }
+
+    public func approveClient(_ id: UUID) {
+        server.approveClient(id)
+    }
+
+    public func denyClient(_ id: UUID) {
+        server.denyClient(id)
     }
 
     public func toggleRunning() {
@@ -273,6 +292,12 @@ public final class AppState {
         server.onTelemetryUpdate = { [weak self] stats in
             Task { @MainActor in
                 self?.telemetry = stats
+            }
+        }
+
+        server.onPendingApprovalsChanged = { [weak self] pending in
+            Task { @MainActor in
+                self?.pendingApprovals = pending
             }
         }
 
