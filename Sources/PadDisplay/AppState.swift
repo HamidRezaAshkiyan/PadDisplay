@@ -30,6 +30,7 @@ public final class AppState {
     }
     public var connectionTab: ConnectionTab = .wifi
     public var protocolTab: ProtocolTab = .http
+    public var preferLocalHostname: Bool = true
     public var copiedFeedback: Bool = false
 
     // Live runtime state
@@ -65,20 +66,30 @@ public final class AppState {
     }
 
     public var activeURLString: String? {
-        let endpoint: NetworkEndpoint?
         switch connectionTab {
         case .usb:
-            endpoint = network.usbEndpoint
+            guard let endpoint = network.usbEndpoint else { return nil }
+            return protocolTab == .http
+                ? endpoint.httpURL(port: server.httpPort)
+                : endpoint.httpsURL(port: server.httpsPort)
         case .wifi:
-            endpoint = network.wifiEndpoint
+            guard let endpoint = network.wifiEndpoint else { return nil }
+            if preferLocalHostname {
+                return protocolTab == .http
+                    ? network.localHTTPURL(port: server.httpPort)
+                    : network.localHTTPSURL(port: server.httpsPort)
+            }
+            return protocolTab == .http
+                ? endpoint.httpURL(port: server.httpPort)
+                : endpoint.httpsURL(port: server.httpsPort)
         }
-        guard let endpoint else { return nil }
-        switch protocolTab {
-        case .http:
-            return endpoint.httpURL(port: server.httpPort)
-        case .https:
-            return endpoint.httpsURL(port: server.httpsPort)
+    }
+
+    public var secondaryWiFiIPString: String? {
+        guard connectionTab == .wifi, preferLocalHostname, let ip = network.wifiEndpoint?.ipAddress else {
+            return nil
         }
+        return "IP: \(ip)"
     }
 
     public func refreshPermissions() {

@@ -114,8 +114,20 @@ allPassed = runTest("CertManager generates local CA, TLS identity, and iPad .mob
     try assertTrue(xml.contains("com.apple.security.root"), "mobileconfig root payload type")
 } && allPassed
 
+allPassed = runTest("NetworkSnapshot generates stable .local HTTP and HTTPS URLs") {
+    try assertEqual(NetworkSnapshot.normalizeLocalHostname("My-MacBook"), "My-MacBook.local")
+    try assertEqual(NetworkSnapshot.normalizeLocalHostname("My-MacBook.local"), "My-MacBook.local")
+    let snap = NetworkSnapshot(
+        usbEndpoint: nil,
+        wifiEndpoint: NetworkEndpoint(kind: .wifi, interfaceName: "en0", ipAddress: "192.168.1.42"),
+        localHostname: "My-MacBook.local"
+    )
+    try assertEqual(snap.localHTTPURL(port: 8080), "http://My-MacBook.local:8080")
+    try assertEqual(snap.localHTTPSURL(port: 8443), "https://My-MacBook.local:8443")
+} && allPassed
+
 if allPassed {
-    print("All 5 tests passed!")
+    print("All tests passed!")
     exit(0)
 } else {
     print("Some tests failed.")

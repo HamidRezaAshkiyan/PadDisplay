@@ -101,6 +101,12 @@ struct MenuBarView: View {
                             .textSelection(.enabled)
                             .lineLimit(2)
 
+                        if let ipHint = state.secondaryWiFiIPString {
+                            Text(ipHint)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+
                         Button(state.copiedFeedback ? "Copied!" : "Copy URL") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(urlString, forType: .string)
@@ -118,6 +124,12 @@ struct MenuBarView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                }
+
+                if state.connectionTab == .wifi {
+                    Toggle("Use stable .local URL (recommended for Home Screen)", isOn: $state.preferLocalHostname)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
                 }
             } else if state.connectionTab == .usb {
                 VStack(alignment: .leading, spacing: 4) {
