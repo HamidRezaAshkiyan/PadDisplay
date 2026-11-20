@@ -28,6 +28,10 @@ if [[ -d "${RESOURCE_BUNDLE}" ]]; then
     cp -R "${RESOURCE_BUNDLE}" "${RESOURCES_DIR}/"
 fi
 
+if [[ -f "${ROOT_DIR}/Assets/AppIcon.icns" ]]; then
+    cp "${ROOT_DIR}/Assets/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
+fi
+
 cat > "${CONTENTS}/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -37,6 +41,8 @@ cat > "${CONTENTS}/Info.plist" <<'EOF'
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>PadDisplay</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.paddisplay.app</string>
     <key>CFBundleInfoDictionaryVersion</key>

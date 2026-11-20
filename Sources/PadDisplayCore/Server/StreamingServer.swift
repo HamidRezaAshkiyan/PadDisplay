@@ -199,6 +199,10 @@ public final class StreamingServer: @unchecked Sendable {
             return loadWebAsset("styles.css", contentType: "text/css; charset=utf-8")
         case "/manifest.json":
             return loadWebAsset("manifest.json", contentType: "application/manifest+json; charset=utf-8")
+        case "/apple-touch-icon.png":
+            return loadWebAsset("apple-touch-icon.png", contentType: "image/png")
+        case "/icon-512.png":
+            return loadWebAsset("icon-512.png", contentType: "image/png")
         case "/cert.mobileconfig":
             if let profile = try? certManager.mobileConfigData() {
                 return (

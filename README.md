@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Assets/AppIcon-1024.png" width="128" height="128" alt="PadDisplay Icon" />
+</p>
+
 # PadDisplay
 
 Turn your iPad into an extended second monitor for macOS over **Wi-Fi** or **USB cable** — **with no iOS app required**.
