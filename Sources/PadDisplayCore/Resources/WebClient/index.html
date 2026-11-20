@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="PadDisplay" />
+  <title>PadDisplay</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="stage">
+    <canvas id="screen"></canvas>
+    <div id="connecting">
+      <div class="spinner"></div>
+      <div id="connecting-text">Connecting to Mac…</div>
+      <div id="connecting-sub">Tap anywhere once connected to enter fullscreen.</div>
+    </div>
+  </div>
+
+  <!-- Auto-hiding floating HUD (3-finger tap to toggle) -->
+  <div id="hud" class="visible">
+    <div class="hud-group">
+      <span id="status-dot" class="dot offline"></span>
+      <span id="mode-badge" class="badge">Connecting</span>
+      <span id="fps-badge" class="muted">-- FPS</span>
+    </div>
+    <div class="hud-group">
+      <button id="btn-upgrade" class="btn primary hidden">Upgrade to 60fps H.264</button>
+      <button id="btn-touch" class="btn active" title="Toggle Touch &amp; Apple Pencil Input">Touch: ON</button>
+      <button id="btn-fit" class="btn">Fit</button>
+      <button id="btn-fullscreen" class="btn">Fullscreen</button>
+      <button id="btn-hide" class="btn">Hide</button>
+    </div>
+  </div>
+
+  <!-- 1-Tap HTTPS / 60fps H.264 Upgrade Guide Modal -->
+  <div id="upgrade-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2>Unlock 60fps H.264 Mode</h2>
+      <p>iPad Safari requires HTTPS for hardware <code>WebCodecs</code> 60fps streaming. Do this quick one-time setup:</p>
+      <ol>
+        <li>
+          Tap <a id="cert-download-link" href="/cert.mobileconfig" class="inline-btn">Install Local CA Profile</a> and tap <strong>Allow</strong>.
+        </li>
+        <li>
+          Open iPad <strong>Settings → General → VPN &amp; Device Management</strong> → tap <strong>PadDisplay Local HTTPS</strong> → <strong>Install</strong>.
+        </li>
+        <li>
+          Go to <strong>Settings → General → About → Certificate Trust Settings</strong> and enable full trust for <strong>PadDisplay Local CA</strong>.
+        </li>
+        <li>
+          Return here and open 60fps HTTPS mode:
+        </li>
+      </ol>
+      <div class="modal-actions">
+        <a id="open-https-link" href="#" class="btn primary">Open 60fps HTTPS Mode</a>
+        <button id="btn-close-modal" class="btn">Stay in HTTP Mode</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
