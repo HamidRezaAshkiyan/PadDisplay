@@ -6,10 +6,12 @@ import ScreenCaptureKit
 
 public struct CaptureDemand: Sendable, Equatable {
     public var needsH264: Bool
+    public var needsHEVC: Bool
     public var needsJPEG: Bool
 
-    public init(needsH264: Bool = false, needsJPEG: Bool = false) {
+    public init(needsH264: Bool = false, needsHEVC: Bool = false, needsJPEG: Bool = false) {
         self.needsH264 = needsH264
+        self.needsHEVC = needsHEVC
         self.needsJPEG = needsJPEG
     }
 }
@@ -35,27 +37,34 @@ public final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDeleg
     private var lastFPSReportTime = DispatchTime.now().uptimeNanoseconds
 
     public let h264Encoder: H264Encoder
+    public let hevcEncoder: H264Encoder
     public let jpegEncoder: JPEGEncoder
     public var onFPSUpdate: (@Sendable (Double) -> Void)?
     public var onError: (@Sendable (String) -> Void)?
 
     public init(
         onH264Packet: @escaping H264Encoder.PacketHandler,
+        onHEVCPacket: @escaping H264Encoder.PacketHandler,
         onJPEGPacket: @escaping JPEGEncoder.PacketHandler
     ) {
-        self.h264Encoder = H264Encoder(bitrateBps: 12_000_000, onPacket: onH264Packet)
+        self.h264Encoder = H264Encoder(codec: .h264, bitrateBps: 12_000_000, onPacket: onH264Packet)
+        self.hevcEncoder = H264Encoder(codec: .hevc, bitrateBps: 9_000_000, onPacket: onHEVCPacket)
         self.jpegEncoder = JPEGEncoder(maxFPS: 24, quality: 0.65, onPacket: onJPEGPacket)
         super.init()
     }
 
     public func updateDemand(_ newDemand: CaptureDemand) {
-        let becameActive = lock.withLock { () -> Bool in
+        let (h264BecameActive, hevcBecameActive) = lock.withLock { () -> (Bool, Bool) in
             let wasH264 = demand.needsH264
+            let wasHEVC = demand.needsHEVC
             demand = newDemand
-            return !wasH264 && newDemand.needsH264
+            return (!wasH264 && newDemand.needsH264, !wasHEVC && newDemand.needsHEVC)
         }
-        if becameActive {
+        if h264BecameActive {
             h264Encoder.requestKeyframe()
+        }
+        if hevcBecameActive {
+            hevcEncoder.requestKeyframe()
         }
     }
 
@@ -78,6 +87,7 @@ public final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDeleg
         }
 
         try h264Encoder.configure(width: pixelWidth, height: pixelHeight, fps: fps)
+        try? hevcEncoder.configure(width: pixelWidth, height: pixelHeight, fps: fps)
 
         let filter = SCContentFilter(display: targetDisplay, excludingApplications: [], exceptingWindows: [])
         let config = SCStreamConfiguration()
@@ -107,6 +117,7 @@ public final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDeleg
             try? await existing.stopCapture()
         }
         h264Encoder.invalidate()
+        hevcEncoder.invalidate()
         onFPSUpdate?(0)
     }
 
@@ -128,11 +139,14 @@ public final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDeleg
         }
 
         let currentDemand = lock.withLock { demand }
-        guard currentDemand.needsH264 || currentDemand.needsJPEG else { return }
+        guard currentDemand.needsH264 || currentDemand.needsHEVC || currentDemand.needsJPEG else { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if currentDemand.needsH264 {
             h264Encoder.encode(pixelBuffer: pixelBuffer, presentationTimeStamp: pts)
+        }
+        if currentDemand.needsHEVC {
+            hevcEncoder.encode(pixelBuffer: pixelBuffer, presentationTimeStamp: pts)
         }
         if currentDemand.needsJPEG {
             jpegEncoder.encode(pixelBuffer: pixelBuffer, presentationTimeStamp: pts)

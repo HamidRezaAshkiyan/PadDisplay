@@ -55,7 +55,14 @@ struct MenuBarView: View {
     private var statusSubtitle: String {
         if !state.isRunning { return state.statusMessage }
         if state.clients.totalCount > 0 {
-            let mode = state.clients.h264Count > 0 ? "H.264" : "HTTP"
+            let mode: String
+            if state.clients.hevcCount > 0 {
+                mode = "HEVC"
+            } else if state.clients.h264Count > 0 {
+                mode = "H.264"
+            } else {
+                mode = "HTTP"
+            }
             return "\(state.clients.totalCount) iPad connected (\(mode) • \(Int(state.liveFPS.rounded())) FPS)"
         }
         return state.statusMessage
@@ -186,6 +193,13 @@ struct MenuBarView: View {
                     state.applyDisplaySettingsIfRunning()
                 }
             }
+
+            Picker("Codec", selection: $state.preferredCodec) {
+                ForEach(VideoCodec.allCases) { codec in
+                    Text(codec.rawValue).tag(codec)
+                }
+            }
+            .pickerStyle(.segmented)
 
             HStack {
                 Toggle("HiDPI (Retina 2×)", isOn: $state.hiDPI)

@@ -3,23 +3,26 @@ import CoreMedia
 import CoreVideo
 import VideoToolbox
 
-/// Hardware-accelerated low-latency H.264 encoder using Apple VideoToolbox.
-/// Produces AVCC-formatted frames + `avcC` decoder config directly consumable by Safari WebCodecs `VideoDecoder`.
+/// Hardware-accelerated low-latency H.264 / HEVC (H.265) encoder using Apple VideoToolbox.
+/// Produces AVCC/HVCC frames + `avcC`/`hvcC` decoder config directly consumable by Safari WebCodecs `VideoDecoder`.
 public final class H264Encoder: @unchecked Sendable {
     public typealias PacketHandler = @Sendable (EncodedFramePacket) -> Void
 
+    public let codec: VideoCodec
     private let lock = NSLock()
     private var session: VTCompressionSession?
     private var width: Int = 0
     private var height: Int = 0
-    private var bitrateBps: Int = 12_000_000
+    private var bitrateBps: Int
     private var forceNextKeyframe: Bool = true
     private var latestConfigPacket: EncodedFramePacket?
     private var frameCounter: Int64 = 0
     private let onPacket: PacketHandler
 
-    public init(bitrateBps: Int = 12_000_000, onPacket: @escaping PacketHandler) {
-        self.bitrateBps = bitrateBps
+    public init(codec: VideoCodec = .h264, bitrateBps: Int? = nil, onPacket: @escaping PacketHandler) {
+        self.codec = codec
+        // HEVC achieves sharper text at ~30% lower bitrate than H.264
+        self.bitrateBps = bitrateBps ?? (codec == .hevc ? 9_000_000 : 12_000_000)
         self.onPacket = onPacket
     }
 
@@ -60,11 +63,13 @@ public final class H264Encoder: @unchecked Sendable {
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: false
         ]
 
+        let cmCodec: CMVideoCodecType = (codec == .hevc) ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
+
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width),
             height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
+            codecType: cmCodec,
             encoderSpecification: encoderSpec as CFDictionary,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -74,13 +79,16 @@ public final class H264Encoder: @unchecked Sendable {
         )
 
         guard status == noErr, let session = newSession else {
-            throw NSError(domain: "PadDisplay.H264Encoder", code: Int(status), userInfo: [
-                NSLocalizedDescriptionKey: "Failed to create VTCompressionSession (OSStatus \(status))"
+            throw NSError(domain: "PadDisplay.VideoEncoder", code: Int(status), userInfo: [
+                NSLocalizedDescriptionKey: "Failed to create \(codec.rawValue) VTCompressionSession (OSStatus \(status))"
             ])
         }
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
+        let profileLevel = (codec == .hevc)
+            ? kVTProfileLevel_HEVC_Main_AutoLevel
+            : kVTProfileLevel_H264_Main_AutoLevel
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: profileLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (fps * 2) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFNumber)
@@ -148,10 +156,12 @@ public final class H264Encoder: @unchecked Sendable {
             ? UInt64(pts.seconds * 1_000_000)
             : UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
 
+        let atomKey = (codec == .hevc) ? "hvcC" : "avcC"
         if isKeyframe, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
-           let avcC = Self.extractAVCC(from: formatDesc) {
-            let configPayload = EncodedFramePacket.makeH264ConfigPayload(width: width, height: height, avcC: avcC)
-            let configPacket = EncodedFramePacket(type: .h264Config, timestampUs: timestampUs, payload: configPayload)
+           let configAtom = Self.extractConfigAtom(named: atomKey, from: formatDesc) {
+            let configPayload = EncodedFramePacket.makeVideoConfigPayload(width: width, height: height, configBytes: configAtom)
+            let configType: FrameType = (codec == .hevc) ? .hevcConfig : .h264Config
+            let configPacket = EncodedFramePacket(type: configType, timestampUs: timestampUs, payload: configPayload)
             lock.withLock {
                 self.latestConfigPacket = configPacket
             }
@@ -170,12 +180,16 @@ public final class H264Encoder: @unchecked Sendable {
         )
         guard status == kCMBlockBufferNoErr, let ptr = dataPointer, totalLength > 0 else { return }
 
-        let avccFrameData = Data(bytes: ptr, count: totalLength)
-        let packet = EncodedFramePacket(
-            type: isKeyframe ? .h264Keyframe : .h264Delta,
-            timestampUs: timestampUs,
-            payload: avccFrameData
-        )
+        let frameData = Data(bytes: ptr, count: totalLength)
+        let frameType: FrameType
+        switch (codec, isKeyframe) {
+        case (.hevc, true): frameType = .hevcKeyframe
+        case (.hevc, false): frameType = .hevcDelta
+        case (.h264, true): frameType = .h264Keyframe
+        case (.h264, false): frameType = .h264Delta
+        }
+
+        let packet = EncodedFramePacket(type: frameType, timestampUs: timestampUs, payload: frameData)
         onPacket(packet)
     }
 
@@ -188,12 +202,12 @@ public final class H264Encoder: @unchecked Sendable {
         return !notSync
     }
 
-    private static func extractAVCC(from formatDescription: CMFormatDescription) -> Data? {
+    private static func extractConfigAtom(named key: String, from formatDescription: CMFormatDescription) -> Data? {
         guard let extensions = CMFormatDescriptionGetExtensions(formatDescription) as? [CFString: Any],
               let atoms = extensions[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? [String: Any],
-              let avcC = atoms["avcC"] as? Data else {
+              let atomData = atoms[key] as? Data else {
             return nil
         }
-        return avcC
+        return atomData
     }
 }

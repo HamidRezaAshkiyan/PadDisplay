@@ -22,9 +22,12 @@
   const FRAME_H264_KEY = 0x02;
   const FRAME_H264_DELTA = 0x03;
   const FRAME_JPEG = 0x04;
+  const FRAME_HEVC_CONFIG = 0x05;
+  const FRAME_HEVC_KEY = 0x06;
+  const FRAME_HEVC_DELTA = 0x07;
 
   const canUseWebCodecs = Boolean(window.isSecureContext && typeof VideoDecoder === 'function');
-  const streamMode = canUseWebCodecs ? 'h264' : 'jpeg';
+  let streamMode = canUseWebCodecs ? 'h264' : 'jpeg';
 
   let ws = null;
   let decoder = null;
@@ -38,17 +41,30 @@
   let wakeLock = null;
   let serverInfo = { httpPort: 8080, httpsPort: 8443, httpsAvailable: true };
 
-  // Fetch server info to build the 1-tap HTTPS upgrade link
-  fetch('/api/info')
-    .then(r => r.json())
-    .then(info => {
+  // Fetch server info, negotiate HEVC (H.265) vs H.264, and start WebSocket
+  async function bootstrap() {
+    try {
+      const r = await fetch('/api/info');
+      const info = await r.json();
       serverInfo = info;
       if (!canUseWebCodecs && info.httpsAvailable) {
         btnUpgrade.classList.remove('hidden');
         openHttpsLink.href = `https://${window.location.hostname}:${info.httpsPort}/`;
       }
-    })
-    .catch(() => {});
+      if (canUseWebCodecs && info.preferredCodec === 'hevc' && typeof VideoDecoder.isConfigSupported === 'function') {
+        try {
+          const support = await VideoDecoder.isConfigSupported({
+            codec: 'hvc1.1.6.L120.90',
+            hardwareAcceleration: 'prefer-hardware'
+          });
+          if (support && support.supported) {
+            streamMode = 'hevc';
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+    connect();
+  }
 
   function showHUD(autoHide = true) {
     hudEl.classList.remove('hidden');
@@ -75,9 +91,9 @@
     } catch (_) {}
   }
 
-  // MARK: - WebCodecs H.264 Decoder
+  // MARK: - WebCodecs H.264 / HEVC Decoder
 
-  function initDecoder(width, height, avcCBytes) {
+  function initDecoder(isHEVC, width, height, configBytes) {
     if (decoder) {
       try { decoder.close(); } catch (_) {}
       decoder = null;
@@ -86,11 +102,15 @@
     canvas.width = width;
     canvas.height = height;
 
-    // Parse profile/compat/level from avcC bytes [1, 2, 3] for codec string avc1.PPCCLL
-    let codec = 'avc1.4D002A';
-    if (avcCBytes.length >= 4) {
-      const hex = (n) => n.toString(16).padStart(2, '0').toUpperCase();
-      codec = `avc1.${hex(avcCBytes[1])}${hex(avcCBytes[2])}${hex(avcCBytes[3])}`;
+    let codec;
+    if (isHEVC) {
+      codec = 'hvc1.1.6.L120.90';
+    } else {
+      codec = 'avc1.4D002A';
+      if (configBytes.length >= 4) {
+        const hex = (n) => n.toString(16).padStart(2, '0').toUpperCase();
+        codec = `avc1.${hex(configBytes[1])}${hex(configBytes[2])}${hex(configBytes[3])}`;
+      }
     }
 
     decoder = new VideoDecoder({
@@ -115,7 +135,7 @@
       codec,
       codedWidth: width,
       codedHeight: height,
-      description: avcCBytes,
+      description: configBytes,
       hardwareAcceleration: 'prefer-hardware',
       optimizeForLatency: true
     });
@@ -133,18 +153,22 @@
     const timestampUs = Number(view.getBigUint64(1, false));
     const payload = new Uint8Array(arrayBuffer, 9);
 
-    if (frameType === FRAME_H264_CONFIG && canUseWebCodecs) {
+    if ((frameType === FRAME_H264_CONFIG || frameType === FRAME_HEVC_CONFIG) && canUseWebCodecs) {
       if (payload.byteLength < 9) return;
       const pv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
       const width = pv.getUint32(0, false);
       const height = pv.getUint32(4, false);
-      const avcC = payload.subarray(8);
-      initDecoder(width, height, avcC);
+      const configBytes = payload.subarray(8);
+      initDecoder(frameType === FRAME_HEVC_CONFIG, width, height, configBytes);
       return;
     }
 
-    if ((frameType === FRAME_H264_KEY || frameType === FRAME_H264_DELTA) && decoderConfigured && decoder) {
-      const isKey = frameType === FRAME_H264_KEY;
+    const isVideoFrame = (
+      frameType === FRAME_H264_KEY || frameType === FRAME_H264_DELTA ||
+      frameType === FRAME_HEVC_KEY || frameType === FRAME_HEVC_DELTA
+    );
+    if (isVideoFrame && decoderConfigured && decoder) {
+      const isKey = (frameType === FRAME_H264_KEY || frameType === FRAME_HEVC_KEY);
       if (awaitingKeyframe && !isKey) return;
       if (isKey) awaitingKeyframe = false;
 
@@ -211,7 +235,10 @@
 
     ws.onopen = () => {
       statusDot.className = 'dot online';
-      if (streamMode === 'h264') {
+      if (streamMode === 'hevc') {
+        modeBadge.className = 'badge h264';
+        modeBadge.textContent = 'HEVC 60fps';
+      } else if (streamMode === 'h264') {
         modeBadge.className = 'badge h264';
         modeBadge.textContent = 'H.264 60fps';
       } else {
@@ -406,12 +433,12 @@
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && streamMode === 'h264') {
+    if (!document.hidden && (streamMode === 'h264' || streamMode === 'hevc')) {
       awaitingKeyframe = true;
       sendJSON({ cmd: 'keyframe' });
       requestWakeLock();
     }
   });
 
-  connect();
+  bootstrap();
 })();
