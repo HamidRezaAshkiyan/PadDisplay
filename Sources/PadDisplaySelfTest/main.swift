@@ -154,6 +154,13 @@ allPassed = runTest("ClientDisplayMetrics resolves exact orientation and even pi
     try assertEqual(geo2x.pixelHeight, 1488)
 } && allPassed
 
+allPassed = runTest("StreamTelemetry computes bitrate Mbps and formats summary") {
+    let mbps = StreamTelemetry.computeBitrateMbps(bytes: 1_250_000, elapsedSeconds: 1.0)
+    try assertTrue(abs(mbps - 10.0) < 0.01, "Expected 10.0 Mbps")
+    let t = StreamTelemetry(bitrateMbps: 9.4, latencyMs: 14.2, droppedFrames: 2)
+    try assertEqual(t.formattedSummary, "14 ms • 9.4 Mbps • 2 drop")
+} && allPassed
+
 if allPassed {
     print("All tests passed!")
     exit(0)

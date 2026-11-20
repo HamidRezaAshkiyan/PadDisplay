@@ -38,6 +38,11 @@ struct MenuBarView: View {
                 Text(statusSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if state.isRunning && state.clients.totalCount > 0 {
+                    Text(state.telemetry.formattedSummary)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()

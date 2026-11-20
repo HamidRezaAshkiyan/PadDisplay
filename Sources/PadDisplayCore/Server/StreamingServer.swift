@@ -22,6 +22,29 @@ public struct ServerClientSummary: Sendable, Equatable {
     }
 }
 
+public struct StreamTelemetry: Sendable, Equatable {
+    public let bitrateMbps: Double
+    public let latencyMs: Double
+    public let droppedFrames: Int
+
+    public init(bitrateMbps: Double = 0, latencyMs: Double = 0, droppedFrames: Int = 0) {
+        self.bitrateMbps = bitrateMbps
+        self.latencyMs = latencyMs
+        self.droppedFrames = droppedFrames
+    }
+
+    public static func computeBitrateMbps(bytes: Int, elapsedSeconds: Double) -> Double {
+        guard elapsedSeconds > 0, bytes > 0 else { return 0 }
+        return (Double(bytes) * 8.0) / (elapsedSeconds * 1_000_000.0)
+    }
+
+    public var formattedSummary: String {
+        let lat = latencyMs > 0 ? "\(Int(latencyMs.rounded())) ms" : "-- ms"
+        let mbps = String(format: "%.1f Mbps", bitrateMbps)
+        return "\(lat) • \(mbps) • \(droppedFrames) drop"
+    }
+}
+
 /// Dual-port HTTP/WS (:8080) + HTTPS/WSS (:8443) server built purely on Apple's Network.framework.
 public final class StreamingServer: @unchecked Sendable {
     public let httpPort: UInt16
@@ -38,11 +61,17 @@ public final class StreamingServer: @unchecked Sendable {
     private var displaySize: (width: Int, height: Int) = (1194, 834)
     private var preferredCodec: VideoCodec = .hevc
     private var httpsActive: Bool = false
+    private var bytesSentInWindow: Int = 0
+    private var lastTelemetryTick: UInt64 = DispatchTime.now().uptimeNanoseconds
+    private var latestBitrateMbps: Double = 0
+    private var latestLatencyMs: Double = 0
+    private var droppedFramesTotal: Int = 0
 
     public var onClientsChanged: (@Sendable (ServerClientSummary) -> Void)?
     public var onRequestKeyframe: (@Sendable () -> Void)?
     public var onPointerEvent: (@Sendable (PointerEventMessage) -> Void)?
     public var onClientDisplayMetrics: (@Sendable (ClientDisplayMetrics) -> Void)?
+    public var onTelemetryUpdate: (@Sendable (StreamTelemetry) -> Void)?
     public var onLog: (@Sendable (String) -> Void)?
 
     public init(httpPort: UInt16 = 8080, httpsPort: UInt16 = 8443, certManager: CertManager = CertManager()) {
@@ -120,6 +149,10 @@ public final class StreamingServer: @unchecked Sendable {
             self.httpsListener = nil
             self.connections.removeAll()
             self.httpsActive = false
+            self.bytesSentInWindow = 0
+            self.latestBitrateMbps = 0
+            self.latestLatencyMs = 0
+            self.droppedFramesTotal = 0
             return (h, hs, c)
         }
         http?.cancel()
@@ -127,6 +160,7 @@ public final class StreamingServer: @unchecked Sendable {
         for conn in activeConns {
             conn.close()
         }
+        onTelemetryUpdate?(StreamTelemetry())
         notifyClientsChanged()
     }
 
@@ -205,7 +239,32 @@ public final class StreamingServer: @unchecked Sendable {
         }
     }
 
-    fileprivate func handleWebSocketText(_ text: String) {
+    fileprivate func recordSentBytes(_ count: Int) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let snapshot: StreamTelemetry? = lock.withLock {
+            bytesSentInWindow += count
+            let elapsedNs = now &- lastTelemetryTick
+            guard elapsedNs >= 1_000_000_000 else { return nil }
+            let elapsedSec = Double(elapsedNs) / 1_000_000_000.0
+            latestBitrateMbps = StreamTelemetry.computeBitrateMbps(bytes: bytesSentInWindow, elapsedSeconds: elapsedSec)
+            bytesSentInWindow = 0
+            lastTelemetryTick = now
+            return StreamTelemetry(
+                bitrateMbps: latestBitrateMbps,
+                latencyMs: latestLatencyMs,
+                droppedFrames: droppedFramesTotal
+            )
+        }
+        if let snapshot {
+            onTelemetryUpdate?(snapshot)
+        }
+    }
+
+    fileprivate func recordDroppedFrame() {
+        lock.withLock { droppedFramesTotal += 1 }
+    }
+
+    fileprivate func handleWebSocketText(_ text: String, from client: ClientConnection) {
         guard let data = text.data(using: .utf8) else { return }
         if let pointer = try? JSONDecoder().decode(PointerEventMessage.self, from: data) {
             onPointerEvent?(pointer)
@@ -220,6 +279,25 @@ public final class StreamingServer: @unchecked Sendable {
                       let h = (obj["height"] as? NSNumber)?.intValue {
                 let dpr = (obj["dpr"] as? NSNumber)?.doubleValue ?? 2.0
                 onClientDisplayMetrics?(ClientDisplayMetrics(width: w, height: h, dpr: dpr))
+            } else if cmd == "ping", let t = (obj["t"] as? NSNumber)?.doubleValue {
+                let reportedRtt = (obj["rttMs"] as? NSNumber)?.doubleValue ?? 0
+                let snap = lock.withLock { () -> StreamTelemetry in
+                    if reportedRtt > 0 {
+                        latestLatencyMs = reportedRtt / 2.0
+                    }
+                    return StreamTelemetry(
+                        bitrateMbps: latestBitrateMbps,
+                        latencyMs: latestLatencyMs,
+                        droppedFrames: droppedFramesTotal
+                    )
+                }
+                let pongJSON = String(
+                    format: "{\"cmd\":\"pong\",\"t\":%.3f,\"bitrateMbps\":%.2f,\"dropped\":%d}",
+                    t, snap.bitrateMbps, snap.droppedFrames
+                )
+                let pongFrame = WebSocketCodec.encodeServerFrame(opcode: .text, payload: Data(pongJSON.utf8))
+                client.sendControlFrame(pongFrame)
+                onTelemetryUpdate?(snap)
             }
         }
     }
@@ -339,6 +417,12 @@ private final class ClientConnection: @unchecked Sendable {
         server?.removeClient(id)
     }
 
+    func sendControlFrame(_ frameData: Data) {
+        let ok = lock.withLock { !isClosed && _wsMode != nil }
+        guard ok else { return }
+        sendRaw(frameData)
+    }
+
     func sendWebSocketFrame(_ frameData: Data, isCritical: Bool) {
         let allowed = lock.withLock { () -> Bool in
             guard !isClosed, _wsMode != nil else { return false }
@@ -350,8 +434,12 @@ private final class ClientConnection: @unchecked Sendable {
             inFlightSends += 1
             return true
         }
-        guard allowed else { return }
+        guard allowed else {
+            server?.recordDroppedFrame()
+            return
+        }
 
+        server?.recordSentBytes(frameData.count)
         nwConnection.send(content: frameData, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
             self.lock.withLock { self.inFlightSends = max(0, self.inFlightSends - 1) }
@@ -387,7 +475,7 @@ private final class ClientConnection: @unchecked Sendable {
                 switch frame.opcode {
                 case .text:
                     if let text = String(data: frame.payload, encoding: .utf8) {
-                        server?.handleWebSocketText(text)
+                        server?.handleWebSocketText(text, from: self)
                     }
                 case .ping:
                     let pong = WebSocketCodec.encodeServerFrame(opcode: .pong, payload: frame.payload)
