@@ -126,6 +126,17 @@ allPassed = runTest("NetworkSnapshot generates stable .local HTTP and HTTPS URLs
     try assertEqual(snap.localHTTPSURL(port: 8443), "https://My-MacBook.local:8443")
 } && allPassed
 
+allPassed = runTest("HEVC (H.265) binary frame config, keyframe, and delta round-trip") {
+    let hvcC = Data([0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90])
+    let cfgPayload = EncodedFramePacket.makeHEVCConfigPayload(width: 2388, height: 1668, hvcC: hvcC)
+    let cfgPacket = EncodedFramePacket(type: .hevcConfig, timestampUs: 987_654, payload: cfgPayload)
+    try assertEqual(EncodedFramePacket.deserialize(cfgPacket.serialize()), cfgPacket)
+
+    let keyPacket = EncodedFramePacket(type: .hevcKeyframe, timestampUs: 987_700, payload: Data([0x00, 0x00, 0x00, 0x02, 0x26, 0x01]))
+    try assertEqual(EncodedFramePacket.deserialize(keyPacket.serialize()), keyPacket)
+    try assertEqual(VideoCodec.hevc.wireName, "hevc")
+} && allPassed
+
 if allPassed {
     print("All tests passed!")
     exit(0)

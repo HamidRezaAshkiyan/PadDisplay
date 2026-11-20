@@ -4,17 +4,20 @@ import Security
 
 public enum ClientStreamMode: String, Sendable {
     case h264
+    case hevc
     case jpeg
 }
 
 public struct ServerClientSummary: Sendable, Equatable {
     public let h264Count: Int
+    public let hevcCount: Int
     public let jpegCount: Int
 
-    public var totalCount: Int { h264Count + jpegCount }
+    public var totalCount: Int { h264Count + hevcCount + jpegCount }
 
-    public init(h264Count: Int = 0, jpegCount: Int = 0) {
+    public init(h264Count: Int = 0, hevcCount: Int = 0, jpegCount: Int = 0) {
         self.h264Count = h264Count
+        self.hevcCount = hevcCount
         self.jpegCount = jpegCount
     }
 }
@@ -31,7 +34,9 @@ public final class StreamingServer: @unchecked Sendable {
     private var httpsListener: NWListener?
     private var connections: [UUID: ClientConnection] = [:]
     private var cachedH264Config: Data?
+    private var cachedHEVCConfig: Data?
     private var displaySize: (width: Int, height: Int) = (1194, 834)
+    private var preferredCodec: VideoCodec = .hevc
     private var httpsActive: Bool = false
 
     public var onClientsChanged: (@Sendable (ServerClientSummary) -> Void)?
@@ -47,6 +52,10 @@ public final class StreamingServer: @unchecked Sendable {
 
     public func updateDisplaySize(width: Int, height: Int) {
         lock.withLock { displaySize = (width, height) }
+    }
+
+    public func updatePreferredCodec(_ codec: VideoCodec) {
+        lock.withLock { preferredCodec = codec }
     }
 
     public var isHTTPSRunning: Bool {
@@ -135,6 +144,21 @@ public final class StreamingServer: @unchecked Sendable {
         }
     }
 
+    public func broadcastHEVC(_ packet: EncodedFramePacket) {
+        let wsFrame = WebSocketCodec.encodeServerFrame(opcode: .binary, payload: packet.serialize())
+        if packet.type == .hevcConfig {
+            lock.withLock { cachedHEVCConfig = wsFrame }
+        }
+
+        let targets = lock.withLock {
+            connections.values.filter { $0.wsMode == .hevc }
+        }
+        let isCritical = (packet.type == .hevcConfig || packet.type == .hevcKeyframe)
+        for client in targets {
+            client.sendWebSocketFrame(wsFrame, isCritical: isCritical)
+        }
+    }
+
     public func broadcastJPEG(_ packet: EncodedFramePacket) {
         let wsFrame = WebSocketCodec.encodeServerFrame(opcode: .binary, payload: packet.serialize())
         let targets = lock.withLock {
@@ -169,6 +193,11 @@ public final class StreamingServer: @unchecked Sendable {
         notifyClientsChanged()
         if mode == .h264 {
             if let config = lock.withLock({ cachedH264Config }) {
+                client.sendWebSocketFrame(config, isCritical: true)
+            }
+            onRequestKeyframe?()
+        } else if mode == .hevc {
+            if let config = lock.withLock({ cachedHEVCConfig }) {
                 client.sendWebSocketFrame(config, isCritical: true)
             }
             onRequestKeyframe?()
@@ -214,9 +243,9 @@ public final class StreamingServer: @unchecked Sendable {
             }
             return ("500 Internal Server Error", "text/plain", [], Data("Failed to generate profile".utf8))
         case "/api/info":
-            let (size, httpsOK) = lock.withLock { (displaySize, httpsActive) }
+            let (size, httpsOK, codec) = lock.withLock { (displaySize, httpsActive, preferredCodec) }
             let json = """
-            {"httpPort":\(httpPort),"httpsPort":\(httpsPort),"httpsAvailable":\(httpsOK ? "true" : "false"),"width":\(size.width),"height":\(size.height)}
+            {"httpPort":\(httpPort),"httpsPort":\(httpsPort),"httpsAvailable":\(httpsOK ? "true" : "false"),"width":\(size.width),"height":\(size.height),"preferredCodec":"\(codec.wireName)"}
             """
             return ("200 OK", "application/json", [], Data(json.utf8))
         default:
@@ -235,15 +264,17 @@ public final class StreamingServer: @unchecked Sendable {
     private func notifyClientsChanged() {
         let summary = lock.withLock { () -> ServerClientSummary in
             var h264 = 0
+            var hevc = 0
             var jpeg = 0
             for c in connections.values {
                 switch c.wsMode {
                 case .h264: h264 += 1
+                case .hevc: hevc += 1
                 case .jpeg: jpeg += 1
                 case nil: break
                 }
             }
-            return ServerClientSummary(h264Count: h264, jpegCount: jpeg)
+            return ServerClientSummary(h264Count: h264, hevcCount: hevc, jpegCount: jpeg)
         }
         onClientsChanged?(summary)
     }
@@ -303,7 +334,8 @@ private final class ClientConnection: @unchecked Sendable {
     func sendWebSocketFrame(_ frameData: Data, isCritical: Bool) {
         let allowed = lock.withLock { () -> Bool in
             guard !isClosed, _wsMode != nil else { return false }
-            let limit = (_wsMode == .h264) ? (isCritical ? 16 : 4) : 2
+            let isVideoStream = (_wsMode == .h264 || _wsMode == .hevc)
+            let limit = isVideoStream ? (isCritical ? 16 : 4) : 2
             if inFlightSends >= limit {
                 return false
             }
@@ -399,7 +431,9 @@ private final class ClientConnection: @unchecked Sendable {
         if headers["upgrade"]?.lowercased() == "websocket",
            let clientKey = headers["sec-websocket-key"] {
             let mode: ClientStreamMode
-            if path.contains("mode=h264") {
+            if path.contains("mode=hevc") {
+                mode = .hevc
+            } else if path.contains("mode=h264") {
                 mode = .h264
             } else if path.contains("mode=jpeg") {
                 mode = .jpeg

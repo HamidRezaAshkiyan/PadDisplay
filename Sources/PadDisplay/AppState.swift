@@ -25,6 +25,9 @@ public final class AppState {
     public var selectedPreset: DisplayPreset = .default
     public var orientation: DisplayOrientation = .landscape
     public var hiDPI: Bool = false
+    public var preferredCodec: VideoCodec = .hevc {
+        didSet { server.updatePreferredCodec(preferredCodec) }
+    }
     public var touchInputEnabled: Bool = true {
         didSet { inputInjector.isEnabled = touchInputEnabled }
     }
@@ -207,6 +210,7 @@ public final class AppState {
                 self.clients = summary
                 self.captureEngine?.updateDemand(CaptureDemand(
                     needsH264: summary.h264Count > 0,
+                    needsHEVC: summary.hevcCount > 0,
                     needsJPEG: summary.jpegCount > 0
                 ))
             }
@@ -215,6 +219,7 @@ public final class AppState {
         server.onRequestKeyframe = { [weak self] in
             Task { @MainActor in
                 self?.captureEngine?.h264Encoder.requestKeyframe()
+                self?.captureEngine?.hevcEncoder.requestKeyframe()
             }
         }
 
@@ -234,6 +239,9 @@ public final class AppState {
         let engine = DisplayCaptureEngine(
             onH264Packet: { packet in
                 srv.broadcastH264(packet)
+            },
+            onHEVCPacket: { packet in
+                srv.broadcastHEVC(packet)
             },
             onJPEGPacket: { packet in
                 srv.broadcastJPEG(packet)

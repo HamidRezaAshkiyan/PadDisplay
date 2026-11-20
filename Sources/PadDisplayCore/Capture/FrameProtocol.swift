@@ -1,5 +1,18 @@
 import Foundation
 
+public enum VideoCodec: String, CaseIterable, Identifiable, Sendable {
+    case hevc = "HEVC (H.265)"
+    case h264 = "H.264"
+
+    public var id: String { rawValue }
+    public var wireName: String {
+        switch self {
+        case .hevc: return "hevc"
+        case .h264: return "h264"
+        }
+    }
+}
+
 /// Compact binary framing protocol shared between PadDisplay Mac server and iPad Safari WebClient.
 ///
 /// Layout:
@@ -16,6 +29,13 @@ public enum FrameType: UInt8, Sendable {
     case h264Delta = 0x03
     /// Standalone JPEG image frame (zero-setup HTTP fallback mode).
     case jpegFrame = 0x04
+    /// HEVC HEVCDecoderConfigurationRecord (`hvcC`) + 4-byte width + 4-byte height prefix:
+    /// `[width: UInt32 BE][height: UInt32 BE][hvcC bytes...]`
+    case hevcConfig = 0x05
+    /// HEVC IDR keyframe in HVCC length-prefixed NALU format.
+    case hevcKeyframe = 0x06
+    /// HEVC non-IDR delta frame in HVCC length-prefixed NALU format.
+    case hevcDelta = 0x07
 }
 
 public struct EncodedFramePacket: Sendable, Equatable {
@@ -55,14 +75,23 @@ public struct EncodedFramePacket: Sendable, Equatable {
         return EncodedFramePacket(type: type, timestampUs: UInt64(bigEndian: tsBE), payload: payload)
     }
 
-    /// Helper for building `h264Config` payload: `[width: UInt32 BE][height: UInt32 BE][avcC]`
-    public static func makeH264ConfigPayload(width: Int, height: Int, avcC: Data) -> Data {
-        var payload = Data(capacity: 8 + avcC.count)
+    /// Helper for building `h264Config` (`avcC`) or `hevcConfig` (`hvcC`) payload:
+    /// `[width: UInt32 BE][height: UInt32 BE][configBytes]`
+    public static func makeVideoConfigPayload(width: Int, height: Int, configBytes: Data) -> Data {
+        var payload = Data(capacity: 8 + configBytes.count)
         var wBE = UInt32(width).bigEndian
         var hBE = UInt32(height).bigEndian
         withUnsafeBytes(of: &wBE) { payload.append(contentsOf: $0) }
         withUnsafeBytes(of: &hBE) { payload.append(contentsOf: $0) }
-        payload.append(avcC)
+        payload.append(configBytes)
         return payload
+    }
+
+    public static func makeH264ConfigPayload(width: Int, height: Int, avcC: Data) -> Data {
+        makeVideoConfigPayload(width: width, height: height, configBytes: avcC)
+    }
+
+    public static func makeHEVCConfigPayload(width: Int, height: Int, hvcC: Data) -> Data {
+        makeVideoConfigPayload(width: width, height: height, configBytes: hvcC)
     }
 }
