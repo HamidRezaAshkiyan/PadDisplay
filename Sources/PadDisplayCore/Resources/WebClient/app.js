@@ -18,6 +18,11 @@
   const upgradeModal = document.getElementById('upgrade-modal');
   const openHttpsLink = document.getElementById('open-https-link');
   const btnCloseModal = document.getElementById('btn-close-modal');
+  const authModal = document.getElementById('auth-modal');
+  const pinInput = document.getElementById('pin-input');
+  const btnPinSubmit = document.getElementById('btn-pin-submit');
+  const btnRequestApproval = document.getElementById('btn-request-approval');
+  const authStatus = document.getElementById('auth-status');
 
   const FRAME_H264_CONFIG = 0x01;
   const FRAME_H264_KEY = 0x02;
@@ -270,6 +275,28 @@
             const mbps = Number(msg.bitrateMbps || 0).toFixed(1);
             const dropped = Number(msg.dropped || 0);
             telemetryBadge.textContent = `${oneWay} ms • ${mbps} Mbps • ${dropped} drop`;
+          } else if (msg.cmd === 'authRequired') {
+            const cachedPin = sessionStorage.getItem('paddisplay_pin');
+            if (cachedPin && cachedPin.length === 4) {
+              sendJSON({ cmd: 'auth', pin: cachedPin });
+            } else {
+              authStatus.textContent = '';
+              authModal.classList.remove('hidden');
+              setTimeout(() => pinInput.focus(), 100);
+            }
+          } else if (msg.cmd === 'authOK') {
+            authModal.classList.add('hidden');
+            authStatus.textContent = '';
+            sendDisplayMetrics();
+          } else if (msg.cmd === 'authFailed') {
+            sessionStorage.removeItem('paddisplay_pin');
+            authModal.classList.remove('hidden');
+            authStatus.textContent = msg.reason || 'Incorrect PIN. Please try again.';
+            pinInput.value = '';
+            pinInput.focus();
+          } else if (msg.cmd === 'authDenied') {
+            authModal.classList.remove('hidden');
+            authStatus.textContent = 'Connection request was denied on your Mac.';
           }
         } catch (_) {}
       }
@@ -468,6 +495,31 @@
 
   btnCloseModal.addEventListener('click', () => {
     upgradeModal.classList.add('hidden');
+  });
+
+  function submitPIN() {
+    const pin = (pinInput.value || '').trim();
+    if (pin.length !== 4) {
+      authStatus.textContent = 'Please enter all 4 digits.';
+      return;
+    }
+    sessionStorage.setItem('paddisplay_pin', pin);
+    authStatus.textContent = 'Verifying…';
+    sendJSON({ cmd: 'auth', pin });
+  }
+
+  btnPinSubmit.addEventListener('click', submitPIN);
+  pinInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitPIN();
+  });
+  pinInput.addEventListener('input', () => {
+    if ((pinInput.value || '').trim().length === 4) {
+      submitPIN();
+    }
+  });
+  btnRequestApproval.addEventListener('click', () => {
+    authStatus.textContent = 'Waiting for approval in your Mac menu bar…';
+    sendJSON({ cmd: 'requestApproval' });
   });
 
   document.addEventListener('visibilitychange', () => {

@@ -161,6 +161,14 @@ allPassed = runTest("StreamTelemetry computes bitrate Mbps and formats summary")
     try assertEqual(t.formattedSummary, "14 ms • 9.4 Mbps • 2 drop")
 } && allPassed
 
+allPassed = runTest("PIN generation produces 4 digits and verifies strictly") {
+    let pin = StreamingServer.generatePIN()
+    try assertEqual(pin.count, 4, "PIN length must be 4")
+    try assertTrue(pin.allSatisfy { $0.isNumber }, "PIN must be numeric")
+    try assertTrue(StreamingServer.verifyPIN(" \(pin) ", expected: pin), "Matching PIN should pass")
+    try assertTrue(!StreamingServer.verifyPIN("0000", expected: pin == "0000" ? "1111" : pin), "Wrong PIN should fail")
+} && allPassed
+
 if allPassed {
     print("All tests passed!")
     exit(0)
