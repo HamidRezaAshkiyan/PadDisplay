@@ -50,3 +50,32 @@ public struct DisplayPreset: Identifiable, Hashable, Sendable {
 
     public static let `default` = allPresets[1] // iPad Pro / Air 11"
 }
+
+/// Viewport/screen metrics reported by iPad Safari for automatic resolution & rotation matching.
+public struct ClientDisplayMetrics: Codable, Sendable, Equatable {
+    public let width: Int
+    public let height: Int
+    public let dpr: Double
+
+    public init(width: Int, height: Int, dpr: Double = 2.0) {
+        self.width = width
+        self.height = height
+        self.dpr = dpr
+    }
+
+    public var orientation: DisplayOrientation {
+        width >= height ? .landscape : .portrait
+    }
+
+    /// Computes clamped logical dimensions and H.264/HEVC-aligned even pixel dimensions.
+    public func resolvedGeometry(hiDPI: Bool) -> (logicalWidth: Int, logicalHeight: Int, pixelWidth: Int, pixelHeight: Int) {
+        let clampedW = min(max(width, 640), 2560)
+        let clampedH = min(max(height, 480), 2560)
+        let logicalW = clampedW & ~1
+        let logicalH = clampedH & ~1
+        let scale = (hiDPI && dpr >= 1.5) ? 2 : 1
+        let pixelW = min(logicalW * scale, 3840) & ~1
+        let pixelH = min(logicalH * scale, 2560) & ~1
+        return (logicalW, logicalH, max(pixelW, 640), max(pixelH, 480))
+    }
+}

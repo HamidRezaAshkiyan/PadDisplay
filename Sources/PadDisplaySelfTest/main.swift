@@ -137,6 +137,23 @@ allPassed = runTest("HEVC (H.265) binary frame config, keyframe, and delta round
     try assertEqual(VideoCodec.hevc.wireName, "hevc")
 } && allPassed
 
+allPassed = runTest("ClientDisplayMetrics resolves exact orientation and even pixels") {
+    let portrait = ClientDisplayMetrics(width: 834, height: 1194, dpr: 2.0)
+    try assertEqual(portrait.orientation, .portrait)
+    let geo1x = portrait.resolvedGeometry(hiDPI: false)
+    try assertEqual(geo1x.logicalWidth, 834)
+    try assertEqual(geo1x.logicalHeight, 1194)
+    try assertEqual(geo1x.pixelWidth % 2, 0)
+    try assertEqual(geo1x.pixelHeight % 2, 0)
+
+    let oddLandscape = ClientDisplayMetrics(width: 1133, height: 744, dpr: 2.0)
+    try assertEqual(oddLandscape.orientation, .landscape)
+    let geo2x = oddLandscape.resolvedGeometry(hiDPI: true)
+    try assertEqual(geo2x.logicalWidth, 1132)
+    try assertEqual(geo2x.pixelWidth, 2264)
+    try assertEqual(geo2x.pixelHeight, 1488)
+} && allPassed
+
 if allPassed {
     print("All tests passed!")
     exit(0)

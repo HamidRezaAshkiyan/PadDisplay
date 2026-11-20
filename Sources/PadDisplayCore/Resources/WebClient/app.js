@@ -248,6 +248,7 @@
       connectingText.textContent = 'Waiting for Mac display frame…';
       showHUD(true);
       requestWakeLock();
+      sendDisplayMetrics();
     };
 
     ws.onmessage = (evt) => {
@@ -275,6 +276,24 @@
       ws.send(JSON.stringify(obj));
     }
   }
+
+  let metricsDebounceTimer = null;
+  function sendDisplayMetrics() {
+    const w = Math.round(window.innerWidth || window.screen.width);
+    const h = Math.round(window.innerHeight || window.screen.height);
+    const dpr = Number(window.devicePixelRatio || 2);
+    if (w > 0 && h > 0) {
+      sendJSON({ cmd: 'displayMetrics', width: w, height: h, dpr });
+    }
+  }
+
+  function scheduleDisplayMetrics() {
+    clearTimeout(metricsDebounceTimer);
+    metricsDebounceTimer = setTimeout(sendDisplayMetrics, 250);
+  }
+
+  window.addEventListener('resize', scheduleDisplayMetrics);
+  window.addEventListener('orientationchange', scheduleDisplayMetrics);
 
   // MARK: - Touch & Apple Pencil Mapping
 

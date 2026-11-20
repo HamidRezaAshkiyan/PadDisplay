@@ -169,9 +169,21 @@ struct MenuBarView: View {
 
     private var displaySettingsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Virtual Display")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("Virtual Display")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if state.autoMatchIPad, let matched = state.matchedResolutionLabel {
+                    Text("Matched: \(matched)")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+            }
+
+            Toggle("Auto-match iPad resolution & rotation", isOn: $state.autoMatchIPad)
+                .toggleStyle(.checkbox)
+                .font(.caption)
 
             Picker("Preset", selection: $state.selectedPreset) {
                 ForEach(DisplayPreset.allPresets) { preset in
