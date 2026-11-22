@@ -2,7 +2,6 @@
   'use strict';
 
   const canvas = document.getElementById('screen');
-  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
   const connectingEl = document.getElementById('connecting');
   const connectingText = document.getElementById('connecting-text');
   const hudEl = document.getElementById('hud');
@@ -24,6 +23,121 @@
   const btnRequestApproval = document.getElementById('btn-request-approval');
   const authStatus = document.getElementById('auth-status');
 
+  // MARK: - Zero-Copy WebGL2 Renderer (with 2D Canvas fallback)
+
+  let gl = null;
+  let glTexture = null;
+  let ctx2d = null;
+  let cachedCanvasRect = null;
+
+  function invalidateCanvasRect() {
+    cachedCanvasRect = null;
+  }
+
+  function initRenderer() {
+    const glOpts = {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      desynchronized: true,
+      powerPreference: 'high-performance',
+      preserveDrawingBuffer: false
+    };
+    const context = canvas.getContext('webgl2', glOpts) || canvas.getContext('webgl', glOpts);
+    if (!context) {
+      ctx2d = canvas.getContext('2d', { alpha: false, desynchronized: true });
+      return;
+    }
+
+    const vsSrc = `
+      attribute vec2 aPos;
+      varying vec2 vTex;
+      void main() {
+        gl_Position = vec4(aPos, 0.0, 1.0);
+        vTex = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+      }
+    `;
+    const fsSrc = `
+      precision mediump float;
+      varying vec2 vTex;
+      uniform sampler2D uTex;
+      void main() {
+        gl_FragColor = texture2D(uTex, vTex);
+      }
+    `;
+
+    const compile = (type, src) => {
+      const sh = context.createShader(type);
+      context.shaderSource(sh, src);
+      context.compileShader(sh);
+      return context.getShaderParameter(sh, context.COMPILE_STATUS) ? sh : null;
+    };
+
+    const vs = compile(context.VERTEX_SHADER, vsSrc);
+    const fs = compile(context.FRAGMENT_SHADER, fsSrc);
+    if (!vs || !fs) {
+      ctx2d = canvas.getContext('2d', { alpha: false, desynchronized: true });
+      return;
+    }
+
+    const prog = context.createProgram();
+    context.attachShader(prog, vs);
+    context.attachShader(prog, fs);
+    context.linkProgram(prog);
+    if (!context.getProgramParameter(prog, context.LINK_STATUS)) {
+      ctx2d = canvas.getContext('2d', { alpha: false, desynchronized: true });
+      return;
+    }
+
+    context.useProgram(prog);
+    const buf = context.createBuffer();
+    context.bindBuffer(context.ARRAY_BUFFER, buf);
+    context.bufferData(context.ARRAY_BUFFER, new Float32Array([
+      -1, -1, 1, -1, -1, 1,
+      -1,  1, 1, -1,  1, 1
+    ]), context.STATIC_DRAW);
+
+    const aPos = context.getAttribLocation(prog, 'aPos');
+    context.enableVertexAttribArray(aPos);
+    context.vertexAttribPointer(aPos, 2, context.FLOAT, false, 0, 0);
+
+    glTexture = context.createTexture();
+    context.bindTexture(context.TEXTURE_2D, glTexture);
+    context.texParameteri(context.TEXTURE_2D, context.TEXTURE_WRAP_S, context.CLAMP_TO_EDGE);
+    context.texParameteri(context.TEXTURE_2D, context.TEXTURE_WRAP_T, context.CLAMP_TO_EDGE);
+    context.texParameteri(context.TEXTURE_2D, context.TEXTURE_MIN_FILTER, context.LINEAR);
+    context.texParameteri(context.TEXTURE_2D, context.TEXTURE_MAG_FILTER, context.LINEAR);
+
+    gl = context;
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      gl = null;
+      glTexture = null;
+    });
+    canvas.addEventListener('webglcontextrestored', () => {
+      initRenderer();
+    });
+  }
+
+  function renderFrameToCanvas(source, width, height) {
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      invalidateCanvasRect();
+    }
+    if (gl && glTexture) {
+      gl.viewport(0, 0, width, height);
+      gl.bindTexture(gl.TEXTURE_2D, glTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    } else if (ctx2d) {
+      ctx2d.drawImage(source, 0, 0, width, height);
+    }
+  }
+
+  initRenderer();
+
   const FRAME_H264_CONFIG = 0x01;
   const FRAME_H264_KEY = 0x02;
   const FRAME_H264_DELTA = 0x03;
@@ -44,10 +158,27 @@
   let frameCounter = 0;
   let lastFpsTick = performance.now();
   let jpegDecoding = false;
+  let pendingJpegPayload = null;
+  let decodeStartTimes = new Map();
+  let smoothedDecodeMs = 0;
+  let lastKeyframeRequestMs = 0;
   let wakeLock = null;
   let pingInterval = null;
   let lastRttMs = 0;
   let serverInfo = { httpPort: 8080, httpsPort: 8443, httpsAvailable: true };
+
+  function requestKeyframeThrottled() {
+    const now = performance.now();
+    if (now - lastKeyframeRequestMs < 250) return;
+    lastKeyframeRequestMs = now;
+    sendJSON({ cmd: 'keyframe' });
+  }
+
+  function recordDecodeLatency(ms) {
+    if (ms >= 0 && ms < 500) {
+      smoothedDecodeMs = smoothedDecodeMs === 0 ? ms : (smoothedDecodeMs * 0.8 + ms * 0.2);
+    }
+  }
 
   // Fetch server info, negotiate HEVC (H.265) vs H.264, and start WebSocket
   async function bootstrap() {
@@ -123,11 +254,12 @@
 
     decoder = new VideoDecoder({
       output: (frame) => {
-        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-          canvas.width = frame.displayWidth;
-          canvas.height = frame.displayHeight;
+        renderFrameToCanvas(frame, frame.displayWidth, frame.displayHeight);
+        const startMs = decodeStartTimes.get(frame.timestamp);
+        if (startMs !== undefined) {
+          decodeStartTimes.delete(frame.timestamp);
+          recordDecodeLatency(performance.now() - startMs);
         }
-        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
         frame.close();
         onFrameRendered();
       },
@@ -135,7 +267,8 @@
         console.warn('VideoDecoder error:', err);
         decoderConfigured = false;
         awaitingKeyframe = true;
-        sendJSON({ cmd: 'keyframe' });
+        decodeStartTimes.clear();
+        requestKeyframeThrottled();
       }
     });
 
@@ -180,10 +313,16 @@
       if (awaitingKeyframe && !isKey) return;
       if (isKey) awaitingKeyframe = false;
 
-      // Drop delta frames if decoder queue backs up
-      if (!isKey && decoder.decodeQueueSize > 3) return;
+      // Drop delta frames if decoder queue backs up, and resync on next keyframe to avoid broken P-frame chains
+      if (!isKey && decoder.decodeQueueSize > 1) {
+        awaitingKeyframe = true;
+        requestKeyframeThrottled();
+        return;
+      }
 
       try {
+        if (decodeStartTimes.size > 16) decodeStartTimes.clear();
+        decodeStartTimes.set(timestampUs, performance.now());
         const chunk = new EncodedVideoChunk({
           type: isKey ? 'key' : 'delta',
           timestamp: timestampUs,
@@ -192,28 +331,42 @@
         decoder.decode(chunk);
       } catch (err) {
         awaitingKeyframe = true;
-        sendJSON({ cmd: 'keyframe' });
+        decodeStartTimes.clear();
+        requestKeyframeThrottled();
       }
       return;
     }
 
     if (frameType === FRAME_JPEG) {
-      if (jpegDecoding) return;
-      jpegDecoding = true;
-      const blob = new Blob([payload], { type: 'image/jpeg' });
-      createImageBitmap(blob)
-        .then(bitmap => {
-          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-            canvas.width = bitmap.width;
-            canvas.height = bitmap.height;
-          }
-          ctx.drawImage(bitmap, 0, 0);
-          bitmap.close();
-          onFrameRendered();
-        })
-        .catch(() => {})
-        .finally(() => { jpegDecoding = false; });
+      if (jpegDecoding) {
+        // Hold only the freshest JPEG frame so we never decode stale frames
+        pendingJpegPayload = payload;
+        return;
+      }
+      decodeJpegPayload(payload);
     }
+  }
+
+  function decodeJpegPayload(payload) {
+    jpegDecoding = true;
+    const decodeStart = performance.now();
+    const blob = new Blob([payload], { type: 'image/jpeg' });
+    createImageBitmap(blob)
+      .then((bitmap) => {
+        renderFrameToCanvas(bitmap, bitmap.width, bitmap.height);
+        bitmap.close();
+        recordDecodeLatency(performance.now() - decodeStart);
+        onFrameRendered();
+      })
+      .catch(() => {})
+      .finally(() => {
+        jpegDecoding = false;
+        if (pendingJpegPayload) {
+          const next = pendingJpegPayload;
+          pendingJpegPayload = null;
+          decodeJpegPayload(next);
+        }
+      });
   }
 
   function onFrameRendered() {
@@ -272,9 +425,11 @@
           if (msg.cmd === 'pong' && typeof msg.t === 'number') {
             lastRttMs = Math.max(0, performance.now() - msg.t);
             const oneWay = Math.round(lastRttMs / 2);
+            const encMs = Math.round(Number(msg.encodeMs || 0));
+            const decMs = Math.round(smoothedDecodeMs);
             const mbps = Number(msg.bitrateMbps || 0).toFixed(1);
             const dropped = Number(msg.dropped || 0);
-            telemetryBadge.textContent = `${oneWay} ms • ${mbps} Mbps • ${dropped} drop`;
+            telemetryBadge.textContent = `${encMs}+${oneWay}+${decMs} ms • ${mbps} Mbps • ${dropped} drop`;
           } else if (msg.cmd === 'authRequired') {
             const cachedPin = sessionStorage.getItem('paddisplay_pin');
             if (cachedPin && cachedPin.length === 4) {
@@ -338,13 +493,23 @@
     metricsDebounceTimer = setTimeout(sendDisplayMetrics, 250);
   }
 
-  window.addEventListener('resize', scheduleDisplayMetrics);
-  window.addEventListener('orientationchange', scheduleDisplayMetrics);
+  window.addEventListener('resize', () => {
+    invalidateCanvasRect();
+    scheduleDisplayMetrics();
+  });
+  window.addEventListener('orientationchange', () => {
+    invalidateCanvasRect();
+    scheduleDisplayMetrics();
+  });
+  document.addEventListener('fullscreenchange', invalidateCanvasRect);
 
   // MARK: - Touch & Apple Pencil Mapping
 
   function canvasNormalizedCoords(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
+    if (!cachedCanvasRect) {
+      cachedCanvasRect = canvas.getBoundingClientRect();
+    }
+    const rect = cachedCanvasRect;
     const cw = canvas.width || rect.width;
     const ch = canvas.height || rect.height;
     const isFill = canvas.classList.contains('fill');
@@ -472,6 +637,7 @@
 
   btnFit.addEventListener('click', () => {
     canvas.classList.toggle('fill');
+    invalidateCanvasRect();
     btnFit.textContent = canvas.classList.contains('fill') ? 'Fill' : 'Fit';
     showHUD(true);
   });

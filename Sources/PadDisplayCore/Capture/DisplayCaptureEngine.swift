@@ -40,6 +40,14 @@ public final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDeleg
     public let hevcEncoder: H264Encoder
     public let jpegEncoder: JPEGEncoder
     public var onFPSUpdate: (@Sendable (Double) -> Void)?
+    public var onEncodeLatencyUpdate: (@Sendable (Double) -> Void)? {
+        didSet {
+            let cb = onEncodeLatencyUpdate
+            h264Encoder.onEncodeLatencyUpdate = cb
+            hevcEncoder.onEncodeLatencyUpdate = cb
+            jpegEncoder.onEncodeLatencyUpdate = cb
+        }
+    }
     public var onError: (@Sendable (String) -> Void)?
 
     public init(
@@ -47,10 +55,26 @@ public final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDeleg
         onHEVCPacket: @escaping H264Encoder.PacketHandler,
         onJPEGPacket: @escaping JPEGEncoder.PacketHandler
     ) {
-        self.h264Encoder = H264Encoder(codec: .h264, bitrateBps: 12_000_000, onPacket: onH264Packet)
-        self.hevcEncoder = H264Encoder(codec: .hevc, bitrateBps: 9_000_000, onPacket: onHEVCPacket)
-        self.jpegEncoder = JPEGEncoder(maxFPS: 24, quality: 0.65, onPacket: onJPEGPacket)
+        let initial = PerformanceProfile.balanced.resolvedTuning()
+        self.h264Encoder = H264Encoder(codec: .h264, bitrateBps: initial.h264BitrateBps, onPacket: onH264Packet)
+        self.hevcEncoder = H264Encoder(codec: .hevc, bitrateBps: initial.hevcBitrateBps, onPacket: onHEVCPacket)
+        self.jpegEncoder = JPEGEncoder(
+            maxFPS: initial.jpegMaxFPS,
+            quality: CGFloat(initial.jpegQuality),
+            scaleFactor: CGFloat(initial.jpegScaleFactor),
+            onPacket: onJPEGPacket
+        )
         super.init()
+    }
+
+    public func applyPerformanceTuning(_ tuning: PerformanceTuning) {
+        h264Encoder.updateBitrate(tuning.h264BitrateBps)
+        hevcEncoder.updateBitrate(tuning.hevcBitrateBps)
+        jpegEncoder.updateSettings(
+            maxFPS: tuning.jpegMaxFPS,
+            quality: CGFloat(tuning.jpegQuality),
+            scaleFactor: CGFloat(tuning.jpegScaleFactor)
+        )
     }
 
     public func updateDemand(_ newDemand: CaptureDemand) {
@@ -96,7 +120,7 @@ public final class DisplayCaptureEngine: NSObject, SCStreamOutput, SCStreamDeleg
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.showsCursor = true
-        config.queueDepth = 3
+        config.queueDepth = 2
 
         let newStream = SCStream(filter: filter, configuration: config, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)

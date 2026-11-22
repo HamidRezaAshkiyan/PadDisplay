@@ -13,6 +13,80 @@ public enum VideoCodec: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+public struct PerformanceTuning: Sendable, Equatable {
+    public let h264BitrateBps: Int
+    public let hevcBitrateBps: Int
+    public let jpegMaxFPS: Int
+    public let jpegQuality: Double
+    public let jpegScaleFactor: Double
+
+    public init(
+        h264BitrateBps: Int,
+        hevcBitrateBps: Int,
+        jpegMaxFPS: Int,
+        jpegQuality: Double,
+        jpegScaleFactor: Double
+    ) {
+        self.h264BitrateBps = h264BitrateBps
+        self.hevcBitrateBps = hevcBitrateBps
+        self.jpegMaxFPS = jpegMaxFPS
+        self.jpegQuality = jpegQuality
+        self.jpegScaleFactor = jpegScaleFactor
+    }
+}
+
+public enum PerformanceProfile: String, CaseIterable, Identifiable, Sendable {
+    case auto = "Auto"
+    case ultraLowLatency = "Ultra-Low"
+    case balanced = "Balanced"
+    case sharpText = "Sharp"
+
+    public var id: String { rawValue }
+
+    public func resolvedTuning(isUSB: Bool = false, congested: Bool = false) -> PerformanceTuning {
+        switch self {
+        case .auto:
+            if congested {
+                return PerformanceProfile.ultraLowLatency.resolvedTuning(isUSB: isUSB, congested: false)
+            }
+            if isUSB {
+                return PerformanceTuning(
+                    h264BitrateBps: 20_000_000,
+                    hevcBitrateBps: 15_000_000,
+                    jpegMaxFPS: 60,
+                    jpegQuality: 0.65,
+                    jpegScaleFactor: 1.0
+                )
+            }
+            return PerformanceProfile.balanced.resolvedTuning(isUSB: false, congested: false)
+        case .ultraLowLatency:
+            return PerformanceTuning(
+                h264BitrateBps: 8_000_000,
+                hevcBitrateBps: 6_000_000,
+                jpegMaxFPS: 60,
+                jpegQuality: 0.45,
+                jpegScaleFactor: 0.75
+            )
+        case .balanced:
+            return PerformanceTuning(
+                h264BitrateBps: 12_000_000,
+                hevcBitrateBps: 9_000_000,
+                jpegMaxFPS: 45,
+                jpegQuality: 0.55,
+                jpegScaleFactor: 1.0
+            )
+        case .sharpText:
+            return PerformanceTuning(
+                h264BitrateBps: 20_000_000,
+                hevcBitrateBps: 16_000_000,
+                jpegMaxFPS: 35,
+                jpegQuality: 0.75,
+                jpegScaleFactor: 1.0
+            )
+        }
+    }
+}
+
 /// Compact binary framing protocol shared between PadDisplay Mac server and iPad Safari WebClient.
 ///
 /// Layout:
