@@ -96,6 +96,7 @@ public final class NetworkDiscovery: @unchecked Sendable {
     public static func currentSnapshot() -> NetworkSnapshot {
         let hostname = cleanLocalHostname()
         var usbCandidate: NetworkEndpoint?
+        var usbFallbackLinkLocal: NetworkEndpoint?
         var wifiCandidate: NetworkEndpoint?
 
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
@@ -134,18 +135,23 @@ public final class NetworkDiscovery: @unchecked Sendable {
             let ip = String(decoding: ipBytes, as: UTF8.self)
 
             // Classify USB-over-IP vs Wi-Fi / LAN
-            // macOS Internet Sharing to iPad USB creates `bridge100` (usually 192.168.2.1).
-            // iPad USB Hotspot or Apple USB Ethernet creates an `en*` (non-en0) with 172.20.10.x or 169.254.x.x.
-            if name.hasPrefix("bridge") || ip.hasPrefix("192.168.2.") {
+            // macOS Internet Sharing to iPad USB creates `bridge100` (usually 192.168.2.1), never `bridge0` (Thunderbolt Bridge).
+            // iPad USB Hotspot creates an `en*` (non-en0) with 172.20.10.x.
+            let isInternetSharingBridge = name.hasPrefix("bridge") && name != "bridge0"
+            if isInternetSharingBridge || ip.hasPrefix("192.168.2.") {
                 if usbCandidate == nil || name == "bridge100" {
                     usbCandidate = NetworkEndpoint(kind: .usb, interfaceName: name, ipAddress: ip)
                 }
             } else if name == "en0" {
                 wifiCandidate = NetworkEndpoint(kind: .wifi, interfaceName: name, ipAddress: ip)
             } else if name.hasPrefix("en") {
-                if ip.hasPrefix("172.20.10.") || ip.hasPrefix("169.254.") {
+                if ip.hasPrefix("172.20.10.") {
                     if usbCandidate == nil {
                         usbCandidate = NetworkEndpoint(kind: .usb, interfaceName: name, ipAddress: ip)
+                    }
+                } else if ip.hasPrefix("169.254.") {
+                    if usbFallbackLinkLocal == nil {
+                        usbFallbackLinkLocal = NetworkEndpoint(kind: .usb, interfaceName: name, ipAddress: ip)
                     }
                 } else if wifiCandidate == nil {
                     wifiCandidate = NetworkEndpoint(kind: .wifi, interfaceName: name, ipAddress: ip)
@@ -153,7 +159,11 @@ public final class NetworkDiscovery: @unchecked Sendable {
             }
         }
 
-        return NetworkSnapshot(usbEndpoint: usbCandidate, wifiEndpoint: wifiCandidate, localHostname: hostname)
+        return NetworkSnapshot(
+            usbEndpoint: usbCandidate ?? usbFallbackLinkLocal,
+            wifiEndpoint: wifiCandidate,
+            localHostname: hostname
+        )
     }
 
     private static func cleanLocalHostname() -> String {

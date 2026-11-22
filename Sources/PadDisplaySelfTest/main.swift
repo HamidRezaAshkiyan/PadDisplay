@@ -199,6 +199,12 @@ allPassed = runTest("PIN generation produces 4 digits and verifies strictly") {
     try assertTrue(!StreamingServer.verifyPIN("0000", expected: pin == "0000" ? "1111" : pin), "Wrong PIN should fail")
 } && allPassed
 
+allPassed = runTest("StreamingServer loads WebClient index.html without Bundle.module crash") {
+    let server = StreamingServer()
+    let htmlData = server.loadWebAssetData("index.html")
+    try assertTrue(htmlData != nil && !(htmlData?.isEmpty ?? true), "index.html must load from resource bundle")
+} && allPassed
+
 if allPassed {
     print("All tests passed!")
     exit(0)
