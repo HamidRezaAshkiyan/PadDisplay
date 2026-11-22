@@ -6,6 +6,10 @@ import PadDisplayCore
 struct MenuBarView: View {
     @Bindable var state: AppState
 
+    private var appVersion: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.2.2"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             headerSection
@@ -97,6 +101,13 @@ struct MenuBarView: View {
                         .frame(width: 8, height: 8)
                     Text("PadDisplay")
                         .font(.headline)
+                    Text("v\(appVersion)")
+                        .font(.system(.caption2, design: .monospaced).weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.14))
+                        .clipShape(Capsule())
                 }
                 Text(statusSubtitle)
                     .font(.caption)
