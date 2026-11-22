@@ -281,6 +281,13 @@ struct MenuBarView: View {
             }
             .pickerStyle(.segmented)
 
+            Picker("Latency", selection: $state.performanceProfile) {
+                ForEach(PerformanceProfile.allCases) { profile in
+                    Text(profile.rawValue).tag(profile)
+                }
+            }
+            .pickerStyle(.segmented)
+
             HStack {
                 Toggle("HiDPI (Retina 2×)", isOn: $state.hiDPI)
                     .onChange(of: state.hiDPI) { _, _ in

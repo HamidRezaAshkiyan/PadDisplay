@@ -36,6 +36,9 @@ public struct PointerEventMessage: Codable, Sendable, Equatable {
 public final class InputInjector: @unchecked Sendable {
     private let lock = NSLock()
     private var virtualDisplayID: CGDirectDisplayID = kCGNullDirectDisplay
+    private var cachedBounds: CGRect = .zero
+    private var cachedTrusted: Bool = false
+    private var lastTrustCheckNs: UInt64 = 0
     public var isEnabled: Bool {
         get { lock.withLock { _isEnabled } }
         set { lock.withLock { _isEnabled = newValue } }
@@ -45,7 +48,18 @@ public final class InputInjector: @unchecked Sendable {
     public init() {}
 
     public func setVirtualDisplayID(_ id: CGDirectDisplayID) {
-        lock.withLock { virtualDisplayID = id }
+        let bounds = (id != kCGNullDirectDisplay) ? CGDisplayBounds(id) : .zero
+        lock.withLock {
+            virtualDisplayID = id
+            cachedBounds = bounds
+        }
+    }
+
+    public func refreshDisplayBounds() {
+        let id = lock.withLock { virtualDisplayID }
+        guard id != kCGNullDirectDisplay else { return }
+        let bounds = CGDisplayBounds(id)
+        lock.withLock { cachedBounds = bounds }
     }
 
     public static func isAccessibilityTrusted(prompt: Bool = false) -> Bool {
@@ -79,10 +93,25 @@ public final class InputInjector: @unchecked Sendable {
     }
 
     public func handle(_ event: PointerEventMessage) {
-        let (enabled, displayID) = lock.withLock { (_isEnabled, virtualDisplayID) }
-        guard enabled, displayID != kCGNullDirectDisplay, Self.isAccessibilityTrusted() else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        var (enabled, displayID, bounds, trusted, needsTrustCheck) = lock.withLock {
+            (_isEnabled, virtualDisplayID, cachedBounds, cachedTrusted, (now &- lastTrustCheckNs) >= 2_000_000_000)
+        }
+        guard enabled, displayID != kCGNullDirectDisplay else { return }
 
-        let bounds = CGDisplayBounds(displayID)
+        if needsTrustCheck {
+            trusted = Self.isAccessibilityTrusted()
+            lock.withLock {
+                cachedTrusted = trusted
+                lastTrustCheckNs = now
+            }
+        }
+        guard trusted else { return }
+
+        if bounds.width <= 0 || bounds.height <= 0 {
+            bounds = CGDisplayBounds(displayID)
+            lock.withLock { cachedBounds = bounds }
+        }
         guard bounds.width > 0, bounds.height > 0 else { return }
 
         let point = Self.mapNormalizedPoint(x: event.x, y: event.y, into: bounds)

@@ -25,11 +25,13 @@ public struct ServerClientSummary: Sendable, Equatable {
 public struct StreamTelemetry: Sendable, Equatable {
     public let bitrateMbps: Double
     public let latencyMs: Double
+    public let encodeLatencyMs: Double
     public let droppedFrames: Int
 
-    public init(bitrateMbps: Double = 0, latencyMs: Double = 0, droppedFrames: Int = 0) {
+    public init(bitrateMbps: Double = 0, latencyMs: Double = 0, encodeLatencyMs: Double = 0, droppedFrames: Int = 0) {
         self.bitrateMbps = bitrateMbps
         self.latencyMs = latencyMs
+        self.encodeLatencyMs = encodeLatencyMs
         self.droppedFrames = droppedFrames
     }
 
@@ -39,7 +41,9 @@ public struct StreamTelemetry: Sendable, Equatable {
     }
 
     public var formattedSummary: String {
-        let lat = latencyMs > 0 ? "\(Int(latencyMs.rounded())) ms" : "-- ms"
+        let netPart = latencyMs > 0 ? "\(Int(latencyMs.rounded()))ms net" : "--ms net"
+        let encPart = encodeLatencyMs > 0 ? "\(Int(encodeLatencyMs.rounded()))ms enc" : nil
+        let lat = encPart.map { "\($0) + \(netPart)" } ?? netPart
         let mbps = String(format: "%.1f Mbps", bitrateMbps)
         return "\(lat) • \(mbps) • \(droppedFrames) drop"
     }
@@ -77,7 +81,9 @@ public final class StreamingServer: @unchecked Sendable {
     private var lastTelemetryTick: UInt64 = DispatchTime.now().uptimeNanoseconds
     private var latestBitrateMbps: Double = 0
     private var latestLatencyMs: Double = 0
+    private var latestEncodeLatencyMs: Double = 0
     private var droppedFramesTotal: Int = 0
+    private var lastAutoKeyframeRequestNs: UInt64 = 0
     private var requireAuth: Bool = true
     private var pinCode: String = StreamingServer.generatePIN()
     private var pendingApprovals: [UUID: PendingClientRequest] = [:]
@@ -102,6 +108,10 @@ public final class StreamingServer: @unchecked Sendable {
 
     public func updatePreferredCodec(_ codec: VideoCodec) {
         lock.withLock { preferredCodec = codec }
+    }
+
+    public func updateEncodeLatency(_ ms: Double) {
+        lock.withLock { latestEncodeLatencyMs = ms }
     }
 
     public static func generatePIN() -> String {
@@ -155,8 +165,11 @@ public final class StreamingServer: @unchecked Sendable {
         stop()
 
         // 1. Plain HTTP + WS listener (zero-setup mode + .mobileconfig installer)
-        let httpParams = NWParameters.tcp
+        let httpTCP = NWProtocolTCP.Options()
+        httpTCP.noDelay = true
+        let httpParams = NWParameters(tls: nil, tcp: httpTCP)
         httpParams.allowLocalEndpointReuse = true
+        httpParams.serviceClass = .interactiveVideo
         let http = try NWListener(using: httpParams, on: NWEndpoint.Port(rawValue: httpPort)!)
         http.newConnectionHandler = { [weak self] nwConn in
             self?.accept(nwConn, isTLS: false)
@@ -169,15 +182,18 @@ public final class StreamingServer: @unchecked Sendable {
         http.start(queue: queue)
         lock.withLock { self.httpListener = http }
 
-        // 2. HTTPS + WSS listener (60fps H.264 WebCodecs mode)
+        // 2. HTTPS + WSS listener (60fps H.264/HEVC WebCodecs mode)
         do {
             let identity = try certManager.ensureTLSIdentity(ips: ips, hostname: hostname)
             let tlsOptions = NWProtocolTLS.Options()
             sec_protocol_options_set_local_identity(tlsOptions.securityProtocolOptions, identity)
             sec_protocol_options_set_min_tls_protocol_version(tlsOptions.securityProtocolOptions, .TLSv12)
 
-            let httpsParams = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+            let httpsTCP = NWProtocolTCP.Options()
+            httpsTCP.noDelay = true
+            let httpsParams = NWParameters(tls: tlsOptions, tcp: httpsTCP)
             httpsParams.allowLocalEndpointReuse = true
+            httpsParams.serviceClass = .interactiveVideo
 
             let https = try NWListener(using: httpsParams, on: NWEndpoint.Port(rawValue: httpsPort)!)
             https.newConnectionHandler = { [weak self] nwConn in
@@ -211,6 +227,7 @@ public final class StreamingServer: @unchecked Sendable {
             self.bytesSentInWindow = 0
             self.latestBitrateMbps = 0
             self.latestLatencyMs = 0
+            self.latestEncodeLatencyMs = 0
             self.droppedFramesTotal = 0
             self.pendingApprovals.removeAll()
             return (h, hs, c)
@@ -226,7 +243,7 @@ public final class StreamingServer: @unchecked Sendable {
     }
 
     public func broadcastH264(_ packet: EncodedFramePacket) {
-        let wsFrame = WebSocketCodec.encodeServerFrame(opcode: .binary, payload: packet.serialize())
+        let wsFrame = WebSocketCodec.encodeBinaryPacket(packet)
         if packet.type == .h264Config {
             lock.withLock { cachedH264Config = wsFrame }
         }
@@ -234,14 +251,15 @@ public final class StreamingServer: @unchecked Sendable {
         let targets = lock.withLock {
             connections.values.filter { $0.wsMode == .h264 && $0.isAuthorized }
         }
-        let isCritical = (packet.type == .h264Config || packet.type == .h264Keyframe)
+        let isKeyframe = (packet.type == .h264Keyframe)
+        let isCritical = (packet.type == .h264Config || isKeyframe)
         for client in targets {
-            client.sendWebSocketFrame(wsFrame, isCritical: isCritical)
+            client.sendWebSocketFrame(wsFrame, isCritical: isCritical, isKeyframe: isKeyframe)
         }
     }
 
     public func broadcastHEVC(_ packet: EncodedFramePacket) {
-        let wsFrame = WebSocketCodec.encodeServerFrame(opcode: .binary, payload: packet.serialize())
+        let wsFrame = WebSocketCodec.encodeBinaryPacket(packet)
         if packet.type == .hevcConfig {
             lock.withLock { cachedHEVCConfig = wsFrame }
         }
@@ -249,19 +267,20 @@ public final class StreamingServer: @unchecked Sendable {
         let targets = lock.withLock {
             connections.values.filter { $0.wsMode == .hevc && $0.isAuthorized }
         }
-        let isCritical = (packet.type == .hevcConfig || packet.type == .hevcKeyframe)
+        let isKeyframe = (packet.type == .hevcKeyframe)
+        let isCritical = (packet.type == .hevcConfig || isKeyframe)
         for client in targets {
-            client.sendWebSocketFrame(wsFrame, isCritical: isCritical)
+            client.sendWebSocketFrame(wsFrame, isCritical: isCritical, isKeyframe: isKeyframe)
         }
     }
 
     public func broadcastJPEG(_ packet: EncodedFramePacket) {
-        let wsFrame = WebSocketCodec.encodeServerFrame(opcode: .binary, payload: packet.serialize())
+        let wsFrame = WebSocketCodec.encodeBinaryPacket(packet)
         let targets = lock.withLock {
             connections.values.filter { $0.wsMode == .jpeg && $0.isAuthorized }
         }
         for client in targets {
-            client.sendWebSocketFrame(wsFrame, isCritical: false)
+            client.sendWebSocketFrame(wsFrame, isCritical: false, isKeyframe: false)
         }
     }
 
@@ -345,6 +364,7 @@ public final class StreamingServer: @unchecked Sendable {
             return StreamTelemetry(
                 bitrateMbps: latestBitrateMbps,
                 latencyMs: latestLatencyMs,
+                encodeLatencyMs: latestEncodeLatencyMs,
                 droppedFrames: droppedFramesTotal
             )
         }
@@ -355,6 +375,18 @@ public final class StreamingServer: @unchecked Sendable {
 
     fileprivate func recordDroppedFrame() {
         lock.withLock { droppedFramesTotal += 1 }
+    }
+
+    fileprivate func requestKeyframeThrottled() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let shouldRequest: Bool = lock.withLock {
+            guard now &- lastAutoKeyframeRequestNs >= 250_000_000 else { return false }
+            lastAutoKeyframeRequestNs = now
+            return true
+        }
+        if shouldRequest {
+            onRequestKeyframe?()
+        }
     }
 
     fileprivate func handleWebSocketText(_ text: String, from client: ClientConnection) {
@@ -407,12 +439,13 @@ public final class StreamingServer: @unchecked Sendable {
                     return StreamTelemetry(
                         bitrateMbps: latestBitrateMbps,
                         latencyMs: latestLatencyMs,
+                        encodeLatencyMs: latestEncodeLatencyMs,
                         droppedFrames: droppedFramesTotal
                     )
                 }
                 let pongJSON = String(
-                    format: "{\"cmd\":\"pong\",\"t\":%.3f,\"bitrateMbps\":%.2f,\"dropped\":%d}",
-                    t, snap.bitrateMbps, snap.droppedFrames
+                    format: "{\"cmd\":\"pong\",\"t\":%.3f,\"bitrateMbps\":%.2f,\"encodeMs\":%.1f,\"dropped\":%d}",
+                    t, snap.bitrateMbps, snap.encodeLatencyMs, snap.droppedFrames
                 )
                 let pongFrame = WebSocketCodec.encodeServerFrame(opcode: .text, payload: Data(pongJSON.utf8))
                 client.sendControlFrame(pongFrame)
@@ -505,6 +538,7 @@ private final class ClientConnection: @unchecked Sendable {
     private var _wsMode: ClientStreamMode?
     private var _isAuthorized: Bool = false
     private var inFlightSends: Int = 0
+    private var needsKeyframeResync: Bool = false
     private var isClosed: Bool = false
 
     var wsMode: ClientStreamMode? {
@@ -566,20 +600,48 @@ private final class ClientConnection: @unchecked Sendable {
         sendRaw(frameData)
     }
 
-    func sendWebSocketFrame(_ frameData: Data, isCritical: Bool) {
-        let allowed = lock.withLock { () -> Bool in
-            guard !isClosed, _wsMode != nil else { return false }
+    func sendWebSocketFrame(_ frameData: Data, isCritical: Bool, isKeyframe: Bool = false) {
+        enum SendDecision {
+            case send
+            case drop
+            case dropAndResync
+        }
+
+        let decision = lock.withLock { () -> SendDecision in
+            guard !isClosed, _wsMode != nil else { return .drop }
             let isVideoStream = (_wsMode == .h264 || _wsMode == .hevc)
-            let limit = isVideoStream ? (isCritical ? 16 : 4) : 2
+
+            if isVideoStream && needsKeyframeResync && !isCritical {
+                return .drop
+            }
+
+            // Tight in-flight caps prevent TCP send-buffer latency buildup
+            let limit = isVideoStream ? (isCritical ? 16 : 2) : 1
             if inFlightSends >= limit {
-                return false
+                if isVideoStream && !isCritical {
+                    needsKeyframeResync = true
+                    return .dropAndResync
+                }
+                return .drop
+            }
+
+            if isKeyframe {
+                needsKeyframeResync = false
             }
             inFlightSends += 1
-            return true
+            return .send
         }
-        guard allowed else {
+
+        switch decision {
+        case .drop:
             server?.recordDroppedFrame()
             return
+        case .dropAndResync:
+            server?.recordDroppedFrame()
+            server?.requestKeyframeThrottled()
+            return
+        case .send:
+            break
         }
 
         server?.recordSentBytes(frameData.count)

@@ -157,8 +157,38 @@ allPassed = runTest("ClientDisplayMetrics resolves exact orientation and even pi
 allPassed = runTest("StreamTelemetry computes bitrate Mbps and formats summary") {
     let mbps = StreamTelemetry.computeBitrateMbps(bytes: 1_250_000, elapsedSeconds: 1.0)
     try assertTrue(abs(mbps - 10.0) < 0.01, "Expected 10.0 Mbps")
-    let t = StreamTelemetry(bitrateMbps: 9.4, latencyMs: 14.2, droppedFrames: 2)
-    try assertEqual(t.formattedSummary, "14 ms • 9.4 Mbps • 2 drop")
+    let t = StreamTelemetry(bitrateMbps: 9.4, latencyMs: 14.2, encodeLatencyMs: 3.1, droppedFrames: 2)
+    try assertEqual(t.formattedSummary, "3ms enc + 14ms net • 9.4 Mbps • 2 drop")
+} && allPassed
+
+allPassed = runTest("Single-allocation WebSocketCodec.encodeBinaryPacket matches two-step encoding") {
+    let payload = Data((0..<4096).map { UInt8($0 & 0xFF) })
+    let packet = EncodedFramePacket(type: .hevcDelta, timestampUs: 987_654_321, payload: payload)
+    let fastWire = WebSocketCodec.encodeBinaryPacket(packet)
+    let legacyWire = WebSocketCodec.encodeServerFrame(opcode: .binary, payload: packet.serialize())
+    try assertEqual(fastWire, legacyWire, "Single-allocation WebSocket binary frame must match byte-for-byte")
+} && allPassed
+
+allPassed = runTest("PerformanceProfile resolves Auto, USB, Congested, and Manual tunings") {
+    let wifiAuto = PerformanceProfile.auto.resolvedTuning(isUSB: false, congested: false)
+    let usbAuto = PerformanceProfile.auto.resolvedTuning(isUSB: true, congested: false)
+    let congestedAuto = PerformanceProfile.auto.resolvedTuning(isUSB: false, congested: true)
+    let ultra = PerformanceProfile.ultraLowLatency.resolvedTuning()
+    try assertEqual(congestedAuto, ultra, "Congested Auto should match Ultra-Low Latency")
+    try assertTrue(usbAuto.h264BitrateBps > wifiAuto.h264BitrateBps, "USB Auto should allow higher bitrate than Wi-Fi Auto")
+    try assertTrue(ultra.jpegMaxFPS == 60 && ultra.jpegScaleFactor < 1.0, "Ultra-Low JPEG should target 60 FPS with downscale")
+} && allPassed
+
+allPassed = runTest("H264Encoder configures low-latency H.264 and HEVC VideoToolbox sessions") {
+    let h264 = H264Encoder(codec: .h264, onPacket: { _ in })
+    try h264.configure(width: 1132, height: 744, fps: 60)
+    h264.updateBitrate(8_000_000)
+    h264.invalidate()
+
+    let hevc = H264Encoder(codec: .hevc, onPacket: { _ in })
+    try hevc.configure(width: 1132, height: 744, fps: 60)
+    hevc.updateBitrate(6_000_000)
+    hevc.invalidate()
 } && allPassed
 
 allPassed = runTest("PIN generation produces 4 digits and verifies strictly") {

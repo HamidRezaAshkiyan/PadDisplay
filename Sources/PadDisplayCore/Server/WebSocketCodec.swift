@@ -55,6 +55,41 @@ public enum WebSocketCodec {
         return out
     }
 
+    /// Single-allocation encoder for a binary `EncodedFramePacket` WebSocket frame.
+    /// Avoids allocating an intermediate serialized `Data` buffer before WebSocket framing.
+    public static func encodeBinaryPacket(_ packet: EncodedFramePacket) -> Data {
+        let payloadLen = EncodedFramePacket.headerSize + packet.payload.count
+        let wsHeaderSize: Int
+        if payloadLen < 126 {
+            wsHeaderSize = 2
+        } else if payloadLen <= 0xFFFF {
+            wsHeaderSize = 4
+        } else {
+            wsHeaderSize = 10
+        }
+
+        var out = Data(capacity: wsHeaderSize + payloadLen)
+        out.append(0x80 | WebSocketOpcode.binary.rawValue)
+
+        if payloadLen < 126 {
+            out.append(UInt8(payloadLen))
+        } else if payloadLen <= 0xFFFF {
+            out.append(126)
+            var len16 = UInt16(payloadLen).bigEndian
+            withUnsafeBytes(of: &len16) { out.append(contentsOf: $0) }
+        } else {
+            out.append(127)
+            var len64 = UInt64(payloadLen).bigEndian
+            withUnsafeBytes(of: &len64) { out.append(contentsOf: $0) }
+        }
+
+        out.append(packet.type.rawValue)
+        var tsBE = packet.timestampUs.bigEndian
+        withUnsafeBytes(of: &tsBE) { out.append(contentsOf: $0) }
+        out.append(packet.payload)
+        return out
+    }
+
     /// Parses as many complete WebSocket frames as available from `buffer`, consuming parsed bytes.
     public static func parseFrames(from buffer: inout Data) -> [WebSocketFrame] {
         var frames: [WebSocketFrame] = []

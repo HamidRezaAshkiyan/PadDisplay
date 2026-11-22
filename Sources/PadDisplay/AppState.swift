@@ -30,6 +30,13 @@ public final class AppState {
     public var preferredCodec: VideoCodec = .hevc {
         didSet { server.updatePreferredCodec(preferredCodec) }
     }
+    public var performanceProfile: PerformanceProfile = .auto {
+        didSet {
+            autoCongested = false
+            cleanTelemetryTicks = 0
+            applyPerformanceProfile()
+        }
+    }
     public var touchInputEnabled: Bool = true {
         didSet { inputInjector.isEnabled = touchInputEnabled }
     }
@@ -58,6 +65,9 @@ public final class AppState {
     // Engine instances
     private var virtualDisplay: PDVirtualDisplay?
     private var lastAppliedMetrics: ClientDisplayMetrics?
+    private var autoCongested: Bool = false
+    private var lastObservedDroppedFrames: Int = 0
+    private var cleanTelemetryTicks: Int = 0
     private let server = StreamingServer(httpPort: 8080, httpsPort: 8443)
     private let networkDiscovery = NetworkDiscovery()
     private let inputInjector = InputInjector()
@@ -74,6 +84,7 @@ public final class AppState {
                 if !hadUSB && snapshot.usbEndpoint != nil {
                     self.connectionTab = .usb
                 }
+                self.applyPerformanceProfile()
             }
         }
     }
@@ -168,6 +179,7 @@ public final class AppState {
             if captureEngine == nil {
                 captureEngine = makeCaptureEngine()
             }
+            applyPerformanceProfile()
             try await captureEngine?.start(
                 displayID: display.displayID,
                 pixelWidth: pixels.width,
@@ -199,6 +211,9 @@ public final class AppState {
         clients = ServerClientSummary()
         matchedResolutionLabel = nil
         lastAppliedMetrics = nil
+        autoCongested = false
+        lastObservedDroppedFrames = 0
+        cleanTelemetryTicks = 0
         statusMessage = "Stopped"
     }
 
@@ -218,6 +233,7 @@ public final class AppState {
                 hiDPI: hiDPI,
                 refreshRate: 60.0
             )
+            inputInjector.refreshDisplayBounds()
             server.updateDisplaySize(width: geo.pixelWidth, height: geo.pixelHeight)
             do {
                 try await captureEngine?.start(
@@ -243,6 +259,7 @@ public final class AppState {
                 hiDPI: hiDPI,
                 refreshRate: 60.0
             )
+            inputInjector.refreshDisplayBounds()
             server.updateDisplaySize(width: pixels.width, height: pixels.height)
             do {
                 try await captureEngine?.start(
@@ -291,7 +308,9 @@ public final class AppState {
 
         server.onTelemetryUpdate = { [weak self] stats in
             Task { @MainActor in
-                self?.telemetry = stats
+                guard let self else { return }
+                self.telemetry = stats
+                self.evaluateAutoPerformance(stats)
             }
         }
 
@@ -304,6 +323,37 @@ public final class AppState {
         server.onLog = { [weak self] msg in
             Task { @MainActor in
                 self?.errorMessage = msg
+            }
+        }
+    }
+
+    public func applyPerformanceProfile() {
+        let isUSB = (connectionTab == .usb && network.usbEndpoint != nil)
+        let tuning = performanceProfile.resolvedTuning(isUSB: isUSB, congested: autoCongested)
+        captureEngine?.applyPerformanceTuning(tuning)
+    }
+
+    private func evaluateAutoPerformance(_ stats: StreamTelemetry) {
+        guard performanceProfile == .auto, isRunning, clients.totalCount > 0 else {
+            lastObservedDroppedFrames = stats.droppedFrames
+            return
+        }
+        let deltaDrops = max(0, stats.droppedFrames - lastObservedDroppedFrames)
+        lastObservedDroppedFrames = stats.droppedFrames
+
+        let isCongestedNow = deltaDrops >= 3 || stats.latencyMs > 35.0
+        if isCongestedNow {
+            cleanTelemetryTicks = 0
+            if !autoCongested {
+                autoCongested = true
+                applyPerformanceProfile()
+            }
+        } else if autoCongested {
+            cleanTelemetryTicks += 1
+            if cleanTelemetryTicks >= 8 {
+                autoCongested = false
+                cleanTelemetryTicks = 0
+                applyPerformanceProfile()
             }
         }
     }
@@ -321,6 +371,9 @@ public final class AppState {
                 srv.broadcastJPEG(packet)
             }
         )
+        engine.onEncodeLatencyUpdate = { ms in
+            srv.updateEncodeLatency(ms)
+        }
         engine.onFPSUpdate = { [weak self] fps in
             Task { @MainActor in
                 self?.liveFPS = fps
