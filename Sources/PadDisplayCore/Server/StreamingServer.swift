@@ -464,9 +464,37 @@ public final class StreamingServer: @unchecked Sendable {
         }
     }
 
+    private static let webResourceBundle: Bundle? = {
+        let bundleName = "PadDisplay_PadDisplayCore.bundle"
+        let candidates: [URL?] = [
+            // Standard macOS .app bundle: Contents/Resources/PadDisplay_PadDisplayCore.bundle
+            Bundle.main.resourceURL?.appendingPathComponent(bundleName),
+            // CLI / swift run: sibling of executable
+            Bundle.main.bundleURL.appendingPathComponent(bundleName),
+            // Framework / dynamic library resource locations
+            Bundle(for: StreamingServer.self).resourceURL?.appendingPathComponent(bundleName),
+            Bundle(for: StreamingServer.self).bundleURL.appendingPathComponent(bundleName)
+        ]
+        for case let url? in candidates {
+            if let bundle = Bundle(url: url) {
+                return bundle
+            }
+        }
+        if Bundle.main.url(forResource: "index.html", withExtension: nil, subdirectory: "WebClient") != nil {
+            return Bundle.main
+        }
+        return nil
+    }()
+
+    public func loadWebAssetData(_ filename: String) -> Data? {
+        guard let url = Self.webResourceBundle?.url(forResource: filename, withExtension: nil, subdirectory: "WebClient") else {
+            return nil
+        }
+        return try? Data(contentsOf: url)
+    }
+
     private func loadWebAsset(_ filename: String, contentType: String) -> (String, String, [String], Data) {
-        if let url = Bundle.module.url(forResource: filename, withExtension: nil, subdirectory: "WebClient"),
-           let data = try? Data(contentsOf: url) {
+        if let data = loadWebAssetData(filename) {
             return ("200 OK", contentType, ["Cache-Control: no-cache"], data)
         }
         return ("404 Not Found", "text/plain", [], Data("Missing asset: \(filename)".utf8))
